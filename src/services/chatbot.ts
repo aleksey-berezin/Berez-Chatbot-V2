@@ -73,6 +73,17 @@ export class ChatbotService {
       session.updatedAt = Date.now();
       await this.redis.storeSession(session);
       
+      // Log comprehensive metrics
+      const totalTime = Date.now() - startTime;
+      console.log(`🤖 CHAT METRICS:`);
+      console.log(`  📝 Question: "${userMessage}"`);
+      console.log(`  🔍 Filters:`, searchQuery.filters);
+      console.log(`  🏠 Properties Found: ${searchResult.properties.length}`);
+      console.log(`  ⚡ Redis Search: ${searchResult.latency}ms`);
+      console.log(`  ⏱️  Total Time: ${totalTime}ms`);
+      console.log(`  💬 Response: "${response.substring(0, 100)}${response.length > 100 ? '...' : ''}"`);
+      console.log(`  📊 Session: ${sessionId} (${session.messages.length} messages)`);
+      
       return response;
       
     } catch (error) {
@@ -159,13 +170,32 @@ export class ChatbotService {
       filters.baths = parseFloat(bathMatch[1]);
     }
 
-    // Extract rent range
-    const rentMatch = lowerQuery.match(/\$?(\d+)(?:\s*-\s*\$?(\d+))?/);
+    // Extract rent range with better logic - avoid matching bed/bath numbers
+    const rentMatch = lowerQuery.match(/\$(\d+)(?:\s*-\s*\$?(\d+))?/);
     if (rentMatch) {
-      filters.rent = {
-        min: parseInt(rentMatch[1]),
-        max: rentMatch[2] ? parseInt(rentMatch[2]) : undefined
-      };
+      if (lowerQuery.includes('under') || lowerQuery.includes('less than') || lowerQuery.includes('below')) {
+        // "under $1500" -> max: 1500
+        filters.rent = {
+          max: parseInt(rentMatch[1])
+        };
+      } else if (lowerQuery.includes('over') || lowerQuery.includes('more than') || lowerQuery.includes('above')) {
+        // "over $1500" -> min: 1500
+        filters.rent = {
+          min: parseInt(rentMatch[1])
+        };
+      } else if (rentMatch[2]) {
+        // "$1000-$2000" -> min: 1000, max: 2000
+        filters.rent = {
+          min: parseInt(rentMatch[1]),
+          max: parseInt(rentMatch[2])
+        };
+      } else {
+        // "$1500" -> exact match
+        filters.rent = {
+          min: parseInt(rentMatch[1]),
+          max: parseInt(rentMatch[1])
+        };
+      }
     }
 
     // Extract city

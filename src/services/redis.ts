@@ -65,38 +65,17 @@ export class RedisService {
   async searchProperties(query: SearchQuery): Promise<SearchResult> {
     const startTime = Date.now();
     
-    if (query.type === 'exact' && query.filters) {
-      // JSON-based exact search
-      const keys = await this.client.keys('property:*');
-      const properties: Property[] = [];
-      
-      for (const key of keys) {
-        const data = await this.client.json.get(key);
-        if (data) {
-          const property = data as unknown as Property;
-          if (this.matchesFilters(property, query.filters)) {
-            properties.push(property);
-          }
-        }
-      }
-      
-      return {
-        properties,
-        query,
-        latency: Date.now() - startTime,
-        cacheHit: false
-      };
-    }
-    
-    // Vector-based semantic search (simplified)
+    // Get all properties and apply filters
     const keys = await this.client.keys('property:*');
     const properties: Property[] = [];
     
-    for (const key of keys.slice(0, 10)) { // Limit for MVP
+    for (const key of keys) {
       const data = await this.client.json.get(key);
       if (data) {
         const property = data as unknown as Property;
-        properties.push(property);
+        if (this.matchesFilters(property, query.filters)) {
+          properties.push(property);
+        }
       }
     }
     

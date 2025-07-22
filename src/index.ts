@@ -132,6 +132,32 @@ app.post('/chat', async (c) => {
   }
 });
 
+// Test chat with logging
+app.post('/test-chat', async (c) => {
+  try {
+    const { message } = await c.req.json();
+    
+    console.log('\n🧪 TESTING CHAT WITH LOGGING:');
+    console.log('='.repeat(50));
+    
+    const response = await chatbot.handleMessage('test-session', message);
+    
+    console.log('='.repeat(50));
+    console.log('✅ TEST COMPLETE\n');
+    
+    return c.json({ 
+      success: true, 
+      response,
+      sessionId: 'test-session'
+    });
+  } catch (error) {
+    return c.json({ 
+      success: false, 
+      error: error instanceof Error ? error.message : 'Unknown error' 
+    }, 500);
+  }
+});
+
 // Properties endpoint
 app.post('/properties', async (c) => {
   try {
