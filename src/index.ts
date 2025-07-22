@@ -1,10 +1,12 @@
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { serve } from '@hono/node-server';
+import { serveStatic } from '@hono/node-server/serve-static';
 import { ChatbotService } from './services/chatbot';
 import { RedisService } from './services/redis';
 import { DataLoader } from './utils/data-loader';
 import { config } from './config';
+import { v4 as uuidv4 } from 'uuid';
 
 const app = new Hono();
 const chatbot = new ChatbotService();
@@ -17,6 +19,9 @@ app.use('*', async (c, next) => {
   await next();
 });
 
+// Serve static files from public directory
+app.use('/*', serveStatic({ root: './public' }));
+
 // Health check
 app.get('/', (c) => c.json({ status: 'ok', region: config.server.region }));
 
@@ -25,10 +30,21 @@ app.get('/test-redis', async (c) => {
   try {
     await redis.connect();
     const isConnected = await redis.testConnection();
+    
+    // Test property search
+    let propertyCount = 0;
+    try {
+      const keys = await redis.getAllPropertyKeys();
+      propertyCount = keys.length;
+    } catch (error) {
+      console.error('Keys error:', error);
+    }
+    
     await redis.disconnect();
     
     return c.json({ 
       connected: isConnected,
+      propertyCount,
       message: isConnected ? 'Redis Cloud connected!' : 'Redis Cloud connection failed'
     });
   } catch (error) {
@@ -118,6 +134,7 @@ app.post('/chat', async (c) => {
       return c.json({ error: 'Message is required' }, 400);
     }
 
+    // Get response from chatbot
     const response = await chatbot.handleMessage(sessionId, message);
     
     return c.json({
@@ -127,7 +144,93 @@ app.post('/chat', async (c) => {
     });
 
   } catch (error) {
-    console.error('Chat error:', error);
+    console.error('❌ Chat error:', error);
+    return c.json({ error: 'Internal server error' }, 500);
+  }
+});
+
+// Streaming chat endpoint
+app.post('/chat/stream', async (c) => {
+  try {
+    const { message, sessionId = 'default' } = await c.req.json();
+    if (!message) {
+      return c.json({ error: 'Message is required' }, 400);
+    }
+
+    // Set SSE headers
+    c.header('Content-Type', 'text/event-stream');
+    c.header('Cache-Control', 'no-cache');
+    c.header('Connection', 'keep-alive');
+    c.header('Access-Control-Allow-Origin', '*');
+
+    const stream = await chatbot.handleMessageStream(sessionId, message);
+    let fullResponse = '';
+
+    // Create a readable stream
+    const readable = new ReadableStream({
+      async start(controller) {
+        try {
+          for await (const chunk of stream) {
+            const content = chunk.choices[0]?.delta?.content || '';
+            if (content) {
+              fullResponse += content;
+              const data = `data: ${JSON.stringify({ content, done: false })}\n\n`;
+              controller.enqueue(new TextEncoder().encode(data));
+              
+              // Add a small delay to make streaming more visible
+              await new Promise(resolve => setTimeout(resolve, 50)); // 50ms delay
+            }
+          }
+
+          // Send completion signal
+          const completionData = `data: ${JSON.stringify({ content: '', done: true, fullResponse })}\n\n`;
+          controller.enqueue(new TextEncoder().encode(completionData));
+          controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+
+          // Update session with full response
+          try {
+            const session = await chatbot['redis'].getSession(sessionId);
+            if (session) {
+              session.messages.push({
+                id: uuidv4(),
+                role: 'user',
+                content: message,
+                timestamp: Date.now()
+              });
+              session.messages.push({
+                id: uuidv4(),
+                role: 'assistant',
+                content: fullResponse,
+                timestamp: Date.now()
+              });
+              session.updatedAt = Date.now();
+              await chatbot['redis'].storeSession(session);
+            }
+          } catch (error) {
+            console.error('Failed to update session:', error);
+          }
+
+        } catch (error) {
+          console.error('Streaming chat error:', error);
+          const errorData = `data: ${JSON.stringify({ error: 'Internal server error' })}\n\n`;
+          controller.enqueue(new TextEncoder().encode(errorData));
+        } finally {
+          controller.close();
+        }
+      }
+    });
+
+    return new Response(readable, {
+      headers: {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'Access-Control-Allow-Origin': '*'
+      }
+    });
+
+  } catch (error) {
+    console.error('Streaming chat error:', error);
     return c.json({ error: 'Internal server error' }, 500);
   }
 });

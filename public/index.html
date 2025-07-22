@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Berez Chatbot API</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 2rem;
+            line-height: 1.6;
+            color: #333;
+        }
+        .header {
+            text-align: center;
+            margin-bottom: 2rem;
+        }
+        .endpoint {
+            background: #f5f5f5;
+            padding: 1rem;
+            margin: 1rem 0;
+            border-radius: 8px;
+            border-left: 4px solid #0070f3;
+        }
+        .method {
+            font-weight: bold;
+            color: #0070f3;
+        }
+        .url {
+            font-family: monospace;
+            background: #e1e1e1;
+            padding: 0.2rem 0.4rem;
+            border-radius: 4px;
+        }
+        .description {
+            margin-top: 0.5rem;
+            color: #666;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🤖 Berez Chatbot API</h1>
+        <p>A real estate chatbot API built with Hono and TypeScript</p>
+    </div>
+
+    <h2>Available Endpoints</h2>
+    
+    <div class="endpoint">
+        <div class="method">GET</div>
+        <div class="url">/api/</div>
+        <div class="description">Health check endpoint</div>
+    </div>
+
+    <div class="endpoint">
+        <div class="method">GET</div>
+        <div class="url">/api/test-redis</div>
+        <div class="description">Test Redis Cloud connection</div>
+    </div>
+
+    <div class="endpoint">
+        <div class="method">POST</div>
+        <div class="url">/api/load-data</div>
+        <div class="description">Load real estate data into Redis</div>
+    </div>
+
+    <div class="endpoint">
+        <div class="method">POST</div>
+        <div class="url">/api/cleanup-data</div>
+        <div class="description">Remove sample data from Redis</div>
+    </div>
+
+    <div class="endpoint">
+        <div class="method">POST</div>
+        <div class="url">/api/cleanup-null</div>
+        <div class="description">Remove null entries from Redis</div>
+    </div>
+
+    <div class="endpoint">
+        <div class="method">POST</div>
+        <div class="url">/api/chat</div>
+        <div class="description">Chat with the real estate chatbot</div>
+    </div>
+
+    <div style="margin-top: 2rem; text-align: center; color: #666;">
+        <p>Deployed on Vercel • Built with TypeScript & Hono</p>
+    </div>
+</body>
+</html> 
