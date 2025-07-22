@@ -35,14 +35,16 @@ npm install
 ```
 
 ### 2. Environment Setup
+Create a `.env` file in the root directory:
 ```bash
-# Copy the example environment file
-cp env.example .env
+# Redis Configuration
+REDIS_URL=redis://localhost:6379
 
-# Edit .env with your actual credentials
-# REDIS_URL=your_redis_url
-# OPENAI_API_KEY=your_openai_api_key
-# PORT=3000
+# OpenAI Configuration
+OPENAI_API_KEY=your_openai_api_key_here
+
+# Server Configuration
+PORT=3000
 ```
 
 ### 3. Development
