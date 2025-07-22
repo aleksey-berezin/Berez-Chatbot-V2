@@ -2,10 +2,10 @@
   "name": "berez-chatbot-v2",
   "version": "1.0.0",
   "description": "Fast hybrid search chatbot with Redis and OpenAI",
+  "type": "module",
   "main": "index.js",
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "tsc",
     "start": "node dist/index.js",
     "type-check": "tsc --noEmit"
   },
