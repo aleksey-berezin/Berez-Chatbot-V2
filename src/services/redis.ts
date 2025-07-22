@@ -158,4 +158,41 @@ export class RedisService {
     
     console.log('Sample data loaded successfully!');
   }
+
+  // Get all property keys
+  async getAllPropertyKeys(): Promise<string[]> {
+    return await this.client.keys('property:*');
+  }
+
+  // Remove sample data
+  async removeSampleData(): Promise<number> {
+    const keys = await this.getAllPropertyKeys();
+    let removedCount = 0;
+    
+    for (const key of keys) {
+      const data = await this.client.json.get(key);
+      if (data && (data as any).source === 'sample') {
+        await this.client.del(key);
+        removedCount++;
+      }
+    }
+    
+    return removedCount;
+  }
+
+  // Remove null/empty entries
+  async removeNullEntries(): Promise<number> {
+    const keys = await this.getAllPropertyKeys();
+    let removedCount = 0;
+    
+    for (const key of keys) {
+      const data = await this.client.json.get(key);
+      if (!data || !(data as any).property_name || !(data as any).source) {
+        await this.client.del(key);
+        removedCount++;
+      }
+    }
+    
+    return removedCount;
+  }
 } 

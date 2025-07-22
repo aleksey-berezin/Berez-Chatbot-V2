@@ -70,6 +70,50 @@ app.post('/load-data', async (c) => {
   }
 });
 
+// Clean up sample data
+app.post('/cleanup-data', async (c) => {
+  try {
+    await redis.connect();
+    
+    const removedCount = await redis.removeSampleData();
+    
+    await redis.disconnect();
+    
+    return c.json({ 
+      success: true, 
+      message: `Removed ${removedCount} sample properties`,
+      removedCount
+    });
+  } catch (error) {
+    return c.json({ 
+      success: false, 
+      error: error instanceof Error ? error.message : 'Unknown error' 
+    }, 500);
+  }
+});
+
+// Clean up null entries
+app.post('/cleanup-null', async (c) => {
+  try {
+    await redis.connect();
+    
+    const removedCount = await redis.removeNullEntries();
+    
+    await redis.disconnect();
+    
+    return c.json({ 
+      success: true, 
+      message: `Removed ${removedCount} null/empty entries`,
+      removedCount
+    });
+  } catch (error) {
+    return c.json({ 
+      success: false, 
+      error: error instanceof Error ? error.message : 'Unknown error' 
+    }, 500);
+  }
+});
+
 // Chat endpoint
 app.post('/chat', async (c) => {
   try {
