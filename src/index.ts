@@ -44,11 +44,7 @@ app.post('/load-data', async (c) => {
   try {
     await redis.connect();
     
-    // Load sample data first
-    const sampleData = DataLoader.generateSampleData();
-    await redis.loadSampleData(sampleData);
-    
-    // Try to load real data
+    // Load real data only
     const realData = await DataLoader.loadAllData();
     if (realData.length > 0) {
       await redis.loadSampleData(realData);
@@ -58,8 +54,7 @@ app.post('/load-data', async (c) => {
     
     return c.json({ 
       success: true, 
-      message: `Loaded ${sampleData.length + realData.length} properties`,
-      sampleData: sampleData.length,
+      message: `Loaded ${realData.length} real properties`,
       realData: realData.length
     });
   } catch (error) {
