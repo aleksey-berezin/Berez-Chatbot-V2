@@ -61,9 +61,9 @@ export class DataLoader {
         },
         listing_urls: {
           listing_id: 'sample-1',
-          view_details_url: 'https://example.com/view/1',
-          apply_now_url: 'https://example.com/apply/1',
-          schedule_showing_url: 'https://example.com/showing/1',
+          view_details_url: 'https://tmgoregon.appfolio.com/listings/detail/sample-1',
+          apply_now_url: 'https://tmgoregon.appfolio.com/listings/rental_applications/new?listable_uid=sample-1',
+          schedule_showing_url: 'https://tmgoregon.appfolio.com/listings/showings/new?listable_uid=sample-1',
           property_website_url: 'https://lincolntownhomes.com'
         },
         unit_details: {
@@ -90,7 +90,11 @@ export class DataLoader {
           pet_deposit: 500
         },
         appliances: ['Dishwasher', 'Microwave', 'Range', 'Refrigerator/Freezer'],
-        photos: ['https://example.com/photo1.jpg'],
+        photos: [
+          'https://images.cdn.appfolio.com/tmgoregon/images/e77071ff-a322-467c-bed2-b2de9e16e465/large.jpg',
+          'https://images.cdn.appfolio.com/tmgoregon/images/4b237699-1d09-4342-b74d-865b0b0f632b/large.jpg',
+          'https://images.cdn.appfolio.com/tmgoregon/images/ff688c33-c248-4f9a-a15f-e7a28ac1735b/large.jpg'
+        ],
         special_offer: {
           flag: false,
           text: null
@@ -112,10 +116,10 @@ export class DataLoader {
         },
         listing_urls: {
           listing_id: 'sample-2',
-          view_details_url: 'https://example.com/view/2',
-          apply_now_url: 'https://example.com/apply/2',
-          schedule_showing_url: 'https://example.com/showing/2',
-          property_website_url: 'https://downtownluxury.com'
+          view_details_url: 'https://downtownluxury.appfolio.com/listings/detail/sample-2',
+          apply_now_url: 'https://downtownluxury.appfolio.com/listings/rental_applications/new?listable_uid=sample-2',
+          schedule_showing_url: 'https://downtownluxury.appfolio.com/listings/showings/new?listable_uid=sample-2',
+          property_website_url: 'https://downtownluxury.appfolio.com'
         },
         unit_details: {
           beds: 1,
@@ -141,7 +145,10 @@ export class DataLoader {
           pet_deposit: null
         },
         appliances: ['Dishwasher', 'Microwave', 'Range', 'Refrigerator/Freezer', 'In-Unit Washer/Dryer'],
-        photos: ['https://example.com/photo2.jpg'],
+        photos: [
+          'https://images.cdn.appfolio.com/tmgoregon/images/d6c00c5e-4fe7-4772-aaaa-f16557485625/large.jpg',
+          'https://images.cdn.appfolio.com/tmgoregon/images/10a075e0-69b6-448f-a6a7-e26f25b21deb/large.jpg'
+        ],
         special_offer: {
           flag: true,
           text: 'First month free!'
