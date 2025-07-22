@@ -1,31 +1,35 @@
 # Berez Chatbot v2
 
-Fast hybrid search chatbot with Redis and OpenAI, optimized for Portland region.
+A fast, hybrid search real estate chatbot built with Hono, Redis Cloud, and OpenAI.
 
 ## 🚀 Features
 
-- **Hybrid Search**: JSON queries + Vector search
-- **Redis Cloud Pro**: Fast 5-10ms latency
-- **OpenAI Integration**: Direct API for speed
-- **Portland Region**: pdx1 edge + us-west-2 Redis
-- **Session Management**: Persistent conversations
-- **Environment Management**: dotenv for configuration
+- **Hybrid Search**: Combines exact filters with semantic understanding
+- **Fast Performance**: <700ms response times with Redis Cloud
+- **Real Data**: Uses actual property listings from real estate APIs
+- **Session Management**: Maintains conversation context
+- **Edge Optimized**: Deployed on Vercel Edge (pdx1 region)
 
 ## 🏗️ Architecture
 
-### Core Stack
-- **Hono**: Fast edge functions
-- **Redis**: JSON + Vector storage
-- **OpenAI**: GPT-4o-mini + embeddings
-- **TypeScript**: Type safety
-- **dotenv**: Environment variable management
+- **Framework**: Hono (fast edge functions)
+- **Database**: Redis Cloud (us-west-2) with RediSearch + RedisJSON
+- **AI**: OpenAI GPT-4o-mini + text-embedding-3-small
+- **Deployment**: Vercel Edge + Regional Optimization (pdx1)
+- **Data**: Real property listings from Lincoln Court and Rock 459 APIs
 
-### Data Flow
-1. User query → Query analysis
-2. Hybrid search (JSON + Vector)
-3. Property matching
-4. AI response generation
-5. Session update
+## 🛠️ Development Principles
+
+### **Data Management**
+- **NEVER use fake sample data** - it creates maintenance headaches
+- Always use real data from APIs or clearly marked test fixtures
+- Fake data requires cleanup endpoints and manual deletion
+- Real data provides better testing and user experience
+
+### **Performance**
+- Target <700ms response times
+- Use Redis Cloud for fast hybrid search
+- Optimize for Portland region (pdx1)
 
 ## 🚀 Quick Start
 
@@ -47,52 +51,61 @@ OPENAI_API_KEY=your_openai_api_key_here
 PORT=3000
 ```
 
-### 3. Development
+### 3. Start Development Server
 ```bash
-# Start development server
 npm run dev
-
-# Type check
-npm run type-check
 ```
 
-### 4. Production
+### 4. Load Real Estate Data
 ```bash
-# Build the project
-npm run build
-
-# Start production server
-npm start
+curl -X POST http://localhost:3000/load-data
 ```
-
-## 🔧 Configuration
-
-The project uses [dotenv](https://github.com/motdotla/dotenv) to load environment variables from `.env` file:
-
-- **REDIS_URL**: Redis connection string
-- **OPENAI_API_KEY**: Your OpenAI API key
-- **PORT**: Server port (default: 3000)
 
 ## 📁 Project Structure
 
 ```
 src/
-├── types.ts          # TypeScript type definitions
-├── config.ts         # Environment configuration
-├── index.ts          # Main server entry point
-└── services/
-    ├── redis.ts      # Redis hybrid search service
-    ├── openai.ts     # OpenAI API integration
-    └── chatbot.ts    # Main chatbot logic
+├── index.ts              # Main server entry point
+├── config.ts             # Environment configuration
+├── types.ts              # TypeScript interfaces
+├── services/
+│   ├── redis.ts         # Redis Cloud service
+│   ├── openai.ts        # OpenAI API service
+│   └── chatbot.ts       # Main chatbot logic
+└── utils/
+    └── data-loader.ts   # Real estate data loader
 ```
 
-## 🚀 API Endpoints
+## 🔌 API Endpoints
 
 - `GET /` - Health check
+- `GET /test-redis` - Test Redis connection
+- `POST /load-data` - Load real estate data
+- `POST /cleanup-data` - Remove sample data
+- `POST /cleanup-null` - Remove null entries
 - `POST /chat` - Chat with the bot
-- `POST /properties` - Add property data
-- `GET /properties` - Search properties
+- `POST /properties` - Add property
+- `GET /properties?q=query` - Search properties
 
-## 📝 License
+## 🎯 Example Usage
 
-[Add your license information here]
+```bash
+# Test the chatbot
+curl -X POST http://localhost:3000/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Show me 2 bedroom apartments under $2000"}'
+
+# Search properties
+curl "http://localhost:3000/properties?q=pet%20friendly%20portland"
+```
+
+## 📊 Performance
+
+- **Response Time**: <700ms target
+- **Region**: Portland (pdx1) for low latency
+- **Database**: Redis Cloud us-west-2
+- **Search**: Hybrid (exact + semantic)
+
+## 🚀 Deployment
+
+Ready for Vercel Edge deployment with regional optimization targeting Portland (pdx1) region.

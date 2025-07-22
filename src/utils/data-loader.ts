@@ -1,5 +1,17 @@
 import { Property } from '../types';
 
+/**
+ * IMPORTANT: NEVER USE FAKE SAMPLE DATA
+ * 
+ * Fake sample data creates maintenance headaches:
+ * - Hard to track what's real vs fake
+ * - Requires cleanup endpoints and manual deletion
+ * - Confuses users and developers
+ * - Adds complexity without value
+ * 
+ * Always use real data from APIs or create realistic test fixtures
+ * that are clearly marked and easily removable.
+ */
 export class DataLoader {
   private static readonly LINCOLN_COURT_URL = 'https://plucky-outlet.cloudvent.net/api/lincoln-court-listings.json';
   private static readonly ROCK459_URL = 'https://plucky-outlet.cloudvent.net/api/rock459-listings.json';
