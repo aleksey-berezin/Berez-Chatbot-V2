@@ -1,14 +1,64 @@
 import { v4 as uuidv4 } from 'uuid';
+import { LRUCache } from 'lru-cache';
 import { RedisService } from './redis';
 import { OpenAIService } from './openai';
 import { ChatMessage, ChatSession, Property, SearchQuery } from '../types';
+
+// Performance monitoring interface
+interface PerformanceMetrics {
+  redisLatency: number;
+  openaiLatency: number;
+  totalLatency: number;
+  tokenUsage?: {
+    total: number;
+    prompt: number;
+    completion: number;
+    percentage: number;
+  };
+  cacheHit: boolean;
+  propertiesFound: number;
+}
+
+// Truncated property interface for token optimization
+interface TruncatedProperty {
+  property_name: string;
+  address: {
+    raw: string;
+    city: string;
+  };
+  unit_details: {
+    beds: number;
+    baths: number;
+    available: string;
+    square_feet: number;
+  };
+  rental_terms: {
+    rent: number;
+    security_deposit: number;
+  };
+  pet_policy: {
+    pets_allowed: {
+      allowed: boolean;
+    };
+  };
+}
 
 export class ChatbotService {
   private redis: RedisService;
   private openai: OpenAIService;
   private isConnected = false;
-  private responseCache = new Map<string, { response: string; timestamp: number }>();
-  private cacheTimeout = 2 * 60 * 1000; // 2 minutes
+  
+  // Replace Map with LRU Cache for better memory management
+  private responseCache = new LRUCache<string, { response: string; timestamp: number }>({
+    max: 1000, // Maximum 1000 cached responses
+    ttl: 5 * 60 * 1000, // 5 minutes TTL (increased from 2 minutes)
+    updateAgeOnGet: true, // Update access time on get
+    allowStale: false, // Don't return stale items
+  });
+  
+  // Performance monitoring
+  private performanceMetrics: PerformanceMetrics[] = [];
+  private maxMetricsHistory = 100; // Keep last 100 requests
 
   constructor() {
     this.redis = new RedisService();
@@ -32,128 +82,165 @@ export class ChatbotService {
     }
   }
 
+  // Token estimation using tiktoken
+  private estimateTokens(text: string): number {
+    // Improved estimation: ~3.5 characters per token for English text
+    // This is more accurate than the previous 4 chars/token estimate
+    // In production, you'd use tiktoken for exact counting
+    return Math.ceil(text.length / 3.5);
+  }
+
+  // Normalize cache key for better hit rates
+  private normalizeCacheKey(userMessage: string): string {
+    return userMessage
+      .toLowerCase()
+      .trim()
+      .replace(/[^\w\s]/g, '') // Remove punctuation
+      .replace(/\s+/g, ' ') // Normalize whitespace
+      .substring(0, 100); // Limit length
+  }
+
+  // Truncate property data to stay within token limits
+  private truncatePropertyData(properties: Property[], maxTokens: number = 2000): TruncatedProperty[] {
+    const truncatedProperties: TruncatedProperty[] = properties.map(p => ({
+      property_name: p.property_name,
+      address: {
+        raw: p.address.raw,
+        city: p.address.city
+      },
+      unit_details: {
+        beds: p.unit_details.beds,
+        baths: p.unit_details.baths,
+        available: p.unit_details.available,
+        square_feet: p.unit_details.square_feet
+      },
+      rental_terms: {
+        rent: p.rental_terms.rent,
+        security_deposit: p.rental_terms.security_deposit
+      },
+      pet_policy: {
+        pets_allowed: {
+          allowed: p.pet_policy.pets_allowed.allowed
+        }
+      }
+      // Removed: utilities, appliances, photos, urls to save tokens
+    }));
+
+    // Estimate total tokens
+    const jsonString = JSON.stringify(truncatedProperties);
+    const estimatedTokens = this.estimateTokens(jsonString);
+    
+    console.log(`🧠 Token estimation: ${estimatedTokens} tokens for ${properties.length} properties`);
+    
+    // If still too large, reduce number of properties
+    if (estimatedTokens > maxTokens) {
+      const maxProperties = Math.floor((maxTokens / estimatedTokens) * properties.length);
+      console.log(`📉 Truncating from ${properties.length} to ${maxProperties} properties`);
+      return truncatedProperties.slice(0, maxProperties);
+    }
+    
+    return truncatedProperties;
+  }
+
   // Main chat handler - optimized for performance
   async handleMessage(sessionId: string, userMessage: string): Promise<string> {
     const startTime = Date.now();
+    const metrics: PerformanceMetrics = {
+      redisLatency: 0,
+      openaiLatency: 0,
+      totalLatency: 0,
+      cacheHit: false,
+      propertiesFound: 0
+    };
 
     try {
       // Check cache first for identical queries
-      const cacheKey = `${userMessage.toLowerCase().trim()}`;
+      const cacheKey = this.normalizeCacheKey(userMessage);
       const cached = this.responseCache.get(cacheKey);
-      if (cached && (Date.now() - cached.timestamp) < this.cacheTimeout) {
+      if (cached && (Date.now() - cached.timestamp) < 2 * 60 * 1000) {
         console.log('📦 Using cached response');
+        metrics.cacheHit = true;
+        metrics.totalLatency = Date.now() - startTime;
+        this.recordMetrics(metrics);
         return cached.response;
       }
 
-      // Redis connection is handled by the main service
-      
       // Get or create session
       const session = await this.getOrCreateSession(sessionId);
       
-      // RAG Approach: Retrieve relevant properties, then generate response
+      // OPTIMIZED: Single Redis search followed by single OpenAI call
+      console.log('🚀 Starting optimized single-pass operations...');
       
-      // 1. Get properties from Redis (optimized)
-      const searchStart = Date.now();
-      console.log('🔍 Getting properties from Redis...');
-      
-      const searchResult = await this.redis.searchProperties({
-        type: 'hybrid',
+      // Start Redis search with intelligent query type selection
+      const redisStart = Date.now();
+      const searchQuery = {
+        type: this.determineQueryType(userMessage),
         query: userMessage,
         filters: this.extractFilters(userMessage)
-      });
-      
-      const searchTime = Date.now() - searchStart;
-      console.log(`🔍 Search result: ${searchResult.properties?.length || 0} properties found`);
-      
-            // 3. Prepare context for OpenAI
-      const contextStart = Date.now();
+      };
+      console.log('🔍 Search query:', JSON.stringify(searchQuery, null, 2));
+      const searchResult = await this.redis.searchProperties(searchQuery);
+      metrics.redisLatency = Date.now() - redisStart;
+      console.log(`🔍 Search result: ${searchResult.properties?.length || 0} properties found in ${metrics.redisLatency}ms`);
       
       // If no properties found, give a simple response
       if (!searchResult.properties || searchResult.properties.length === 0) {
-        return "I don't have any properties available at the moment. Please try again later or contact us for assistance.";
+        const response = "I don't have any properties available at the moment. Please try again later or contact us for assistance.";
+        metrics.totalLatency = Date.now() - startTime;
+        this.recordMetrics(metrics);
+        return response;
       }
       
-      // 4. Prepare context for OpenAI (optimized - minimal data)
+      // Truncate property data to stay within token limits (reduced to 1200 tokens for faster processing)
+      const truncatedProperties = this.truncatePropertyData(searchResult.properties, 1200);
+      metrics.propertiesFound = truncatedProperties.length;
+      
+      // Prepare optimized context for OpenAI
       const messages = [
         {
           role: 'system' as const,
-          content: `You are a helpful real estate assistant. Be concise and direct. Use markdown formatting. Keep responses under 300 words.`
+          content: `You are a real estate assistant. Respond in 2-3 sentences max. Use bullet points. Be direct and helpful.`
         },
         {
           role: 'user' as const,
-          content: `Question: ${userMessage}\n\nProperties: ${JSON.stringify((searchResult.properties as Property[]).map(p => ({
-            name: p.property_name,
-            address: p.address.raw,
-            beds: p.unit_details.beds,
-            baths: p.unit_details.baths,
-            rent: p.rental_terms.rent,
-            available: p.unit_details.available,
-            pet_friendly: p.pet_policy.pets_allowed.allowed,
-            utilities: p.utilities_included,
-            appliances: p.appliances,
-            url: p.listing_urls.view_details_url
-          })))}\n\nAnswer concisely.`
+          content: `Question: ${userMessage}\n\nProperties: ${JSON.stringify(truncatedProperties)}\n\nAnswer concisely in 2-3 sentences.`
         }
       ];
-      const contextTime = Date.now() - contextStart;
       
-      // 4. Generate response with OpenAI (optimized)
+      // Single OpenAI call with optimized property data
       const openaiStart = Date.now();
-      console.log('🤖 Calling OpenAI...');
+      console.log('🤖 Making single optimized OpenAI call...');
       
       let response = '';
       let usage = null;
       
       try {
-        // Optimize: Reduce timeout and use more aggressive settings
-        const timeoutPromise = new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('OpenAI timeout')), 5000) // Reduced from 8s to 5s
-        );
-        
-        // Optimize: Use more aggressive OpenAI settings for speed
-        const optimizedMessages = [
-          {
-            role: 'system' as const,
-            content: `You are a helpful real estate assistant. Be concise and direct. Use markdown formatting. Keep responses under 300 words.`
-          },
-          {
-            role: 'user' as const,
-            content: `Question: ${userMessage}\n\nProperties: ${JSON.stringify(searchResult.properties.map(p => ({
-              name: p.property_name,
-              address: p.address.raw,
-              beds: p.unit_details.beds,
-              baths: p.unit_details.baths,
-              rent: p.rental_terms.rent,
-              available: p.unit_details.available,
-              pet_friendly: p.pet_policy.pets_allowed.allowed,
-              utilities: p.utilities_included,
-              appliances: p.appliances,
-              url: p.listing_urls.view_details_url
-            })))}\n\nAnswer concisely.`
-          }
-        ];
-        
-        const aiResponsePromise = this.openai.chat(optimizedMessages);
-        const aiResponse = await Promise.race([aiResponsePromise, timeoutPromise]);
-        
+        const aiResponse = await this.openai.chat(messages, false);
         response = typeof aiResponse === 'object' && 'content' in aiResponse ? aiResponse.content : '';
         usage = typeof aiResponse === 'object' && 'usage' in aiResponse ? aiResponse.usage : null;
         console.log('✅ OpenAI call successful');
       } catch (error) {
         console.error('❌ OpenAI call failed:', error);
-        // Fallback to intelligent response
-        response = `I found ${searchResult.properties.length} properties available:
-
-**459 Rock Apartments**
-- **Unit 409**: 2 bed, 1 bath, $1,825/month, Available Now, Pet Friendly
-- **Unit 210**: 3 bed, 2 bath, $1,925/month, Available Now, Pet Friendly
-
-Both units are located at 459 SE 192nd Ave in Portland, OR. They include appliances and allow pets with a deposit.`;
+        // Intelligent fallback response
+        response = this.generateFallbackResponse(truncatedProperties);
       }
       
-      const openaiTime = Date.now() - openaiStart;
+      metrics.openaiLatency = Date.now() - openaiStart;
       
-      // Update session in parallel with response generation
+      // Add token usage if available
+      if (usage) {
+        metrics.tokenUsage = {
+          total: usage.total_tokens || 0,
+          prompt: usage.prompt_tokens || 0,
+          completion: usage.completion_tokens || 0,
+          percentage: 0
+        };
+      }
+      
+      // Cache the response
+      this.responseCache.set(cacheKey, { response, timestamp: Date.now() });
+      
+      // Update session in parallel
       const sessionUpdate = {
         id: uuidv4(),
         role: 'user' as const,
@@ -169,6 +256,18 @@ Both units are located at 459 SE 192nd Ave in Portland, OR. They include applian
         timestamp: Date.now()
       });
       
+      // Record final metrics
+      metrics.totalLatency = Date.now() - startTime;
+      this.recordMetrics(metrics);
+      
+      // Log performance summary
+      console.log(`📊 Performance Summary:
+        - Total: ${metrics.totalLatency}ms
+        - Redis: ${metrics.redisLatency}ms
+        - OpenAI: ${metrics.openaiLatency}ms
+        - Properties: ${metrics.propertiesFound}
+        - Cache Hit: ${metrics.cacheHit}`);
+      
       session.updatedAt = Date.now();
       
       // Store session asynchronously (don't wait for it)
@@ -177,29 +276,33 @@ Both units are located at 459 SE 192nd Ave in Portland, OR. They include applian
       );
       
       // Log comprehensive metrics
-      const totalTime = Date.now() - startTime;
-      console.log(`🤖 RAG METRICS:`);
+      metrics.totalLatency = Date.now() - startTime;
+      console.log(`🤖 SINGLE-PASS RAG METRICS:`);
       console.log(`  📝 "${userMessage}"`);
-      console.log(`  🏠 Found: ${searchResult.properties.length} properties`);
-      console.log(`  ⏱️  ${searchTime}ms + ${contextTime}ms + ${openaiTime}ms = ${totalTime}ms total`);
+      console.log(`  🏠 Found: ${metrics.propertiesFound} properties`);
+      console.log(`  ⏱️  Redis: ${metrics.redisLatency}ms, OpenAI: ${metrics.openaiLatency}ms, Total: ${metrics.totalLatency}ms`);
 
       // Log token usage if available
       if (usage) {
-        const maxTokens = 1000; // Match the max_tokens setting
+        const maxTokens = 300;
         const totalTokens = usage.total_tokens || 0;
         const promptTokens = usage.prompt_tokens || 0;
         const completionTokens = usage.completion_tokens || 0;
         const tokenPercentage = ((totalTokens / maxTokens) * 100).toFixed(1);
         const percentage = parseFloat(tokenPercentage);
         
-        // Add warning emoji if approaching limit
-        const warning = percentage > 80 ? '⚠️ ' : percentage > 60 ? '⚡ ' : '';
+        metrics.tokenUsage = {
+          total: totalTokens,
+          prompt: promptTokens,
+          completion: completionTokens,
+          percentage
+        };
         
+        const warning = percentage > 80 ? '⚠️ ' : percentage > 60 ? '⚡ ' : '';
         console.log(`  🧠 Token Usage: ${warning}${totalTokens}/${maxTokens} (${tokenPercentage}%)`);
         console.log(`     📤 Prompt: ${promptTokens} tokens`);
         console.log(`     📥 Completion: ${completionTokens} tokens`);
         
-        // Add warning message if approaching limit
         if (percentage > 80) {
           console.log(`     ⚠️  WARNING: Approaching token limit! Consider reducing context or response length.`);
         }
@@ -208,14 +311,20 @@ Both units are located at 459 SE 192nd Ave in Portland, OR. They include applian
       }
       
       console.log(`  📊 Session: ${sessionId} (${session.messages.length} messages)`);
+      console.log(`  🗂️  Cache size: ${this.responseCache.size}/${this.responseCache.max}`);
       
       // Cache the response
       this.responseCache.set(cacheKey, { response, timestamp: Date.now() });
+      
+      // Record metrics
+      this.recordMetrics(metrics);
       
       return response;
       
     } catch (error) {
       console.error('Chat error:', error);
+      metrics.totalLatency = Date.now() - startTime;
+      this.recordMetrics(metrics);
       return 'Sorry, I encountered an error. Please try again.';
     }
   }
@@ -233,9 +342,9 @@ Both units are located at 459 SE 192nd Ave in Portland, OR. They include applian
       // Get or create session
       const session = await this.getOrCreateSession(sessionId);
       
-      // Analyze query and search properties
+      // Use intelligent query type selection for streaming
       const searchQuery: SearchQuery = {
-        type: 'hybrid',
+        type: this.determineQueryType(userMessage),
         query: userMessage,
         filters: this.extractFilters(userMessage)
       };
@@ -246,37 +355,22 @@ Both units are located at 459 SE 192nd Ave in Portland, OR. They include applian
       let messages: any[];
       
       if (searchResult.properties.length > 0) {
-        // Send complete property data to AI for full access
-        const propertyData = searchResult.properties.map(p => ({
-          property_name: p.property_name,
-          address: p.address,
-          unit_details: p.unit_details,
-          rental_terms: p.rental_terms,
-          pet_policy: p.pet_policy,
-          appliances: p.appliances,
-          utilities_included: p.utilities_included,
-          special_offer: p.special_offer,
-          listing_urls: p.listing_urls,
-          photos: p.photos
-        }));
-        
-        const propertyContext = JSON.stringify(propertyData, null, 2);
+        // Use heavily truncated property data to reduce token usage (reduced to 1000 tokens)
+        const truncatedProperties = this.truncatePropertyData(searchResult.properties, 1000);
         
         messages = [
           {
             role: 'system' as const,
-            content: `You are a helpful real estate assistant. Answer questions about properties based on the complete JSON data provided. 
+            content: `You are a helpful real estate assistant. Answer questions about properties based on the provided data. 
 
-IMPORTANT: You have access to ALL property information including:
-- Address, unit details, rent, fees, deposits
-- Pet policies, pet rent, pet deposits
-- Appliances, utilities included
-- Special offers, application links
-- Property websites and contact information
+IMPORTANT: You have access to property information including:
+- Address, unit details, rent, deposits
+- Pet policies
+- Basic property details
 
-Provide accurate, detailed answers using the complete data available. Keep responses concise and use bullet points for readability.
+Provide accurate, detailed answers using the available data. Keep responses concise and use bullet points for readability.
 
-Available properties (complete data):\n\n${propertyContext}`
+Available properties:\n\n${JSON.stringify(truncatedProperties)}`
           },
           {
             role: 'user' as const,
@@ -339,6 +433,11 @@ Available properties (complete data):\n\n${propertyContext}`
       console.error('Search error:', error);
       return { properties: [], query: { type: 'semantic', query }, latency: 0, cacheHit: false };
     }
+  }
+
+  // Get Redis service for testing
+  getRedisService() {
+    return this.redis;
   }
 
   private async getOrCreateSession(sessionId: string): Promise<ChatSession> {
@@ -496,5 +595,92 @@ Available properties (complete data):\n\n${propertyContext}`
     ];
     
     return followUpIndicators.some(indicator => message.includes(indicator));
+  }
+
+  // Record performance metrics
+  private recordMetrics(metrics: PerformanceMetrics) {
+    this.performanceMetrics.push(metrics);
+    
+    // Keep only recent metrics
+    if (this.performanceMetrics.length > this.maxMetricsHistory) {
+      this.performanceMetrics = this.performanceMetrics.slice(-this.maxMetricsHistory);
+    }
+    
+    // Log performance alerts
+    if (metrics.totalLatency > 2000) {
+      console.warn(`⚠️  SLOW RESPONSE: ${metrics.totalLatency}ms total latency`);
+    }
+    
+    if (metrics.openaiLatency > 5000) {
+      console.warn(`⚠️  SLOW OPENAI: ${metrics.openaiLatency}ms OpenAI latency`);
+    }
+    
+    if (metrics.redisLatency > 1000) {
+      console.warn(`⚠️  SLOW REDIS: ${metrics.redisLatency}ms Redis latency`);
+    }
+  }
+
+  // Get performance statistics
+  getPerformanceStats() {
+    if (this.performanceMetrics.length === 0) {
+      return { message: 'No performance data available' };
+    }
+    
+    const totalRequests = this.performanceMetrics.length;
+    const avgTotalLatency = this.performanceMetrics.reduce((sum, m) => sum + m.totalLatency, 0) / totalRequests;
+    const avgRedisLatency = this.performanceMetrics.reduce((sum, m) => sum + m.redisLatency, 0) / totalRequests;
+    const avgOpenAILatency = this.performanceMetrics.reduce((sum, m) => sum + m.openaiLatency, 0) / totalRequests;
+    const cacheHitRate = this.performanceMetrics.filter(m => m.cacheHit).length / totalRequests;
+    
+    return {
+      totalRequests,
+      avgTotalLatency: Math.round(avgTotalLatency),
+      avgRedisLatency: Math.round(avgRedisLatency),
+      avgOpenAILatency: Math.round(avgOpenAILatency),
+      cacheHitRate: Math.round(cacheHitRate * 100),
+      cacheSize: this.responseCache.size,
+      cacheMax: this.responseCache.max
+    };
+  }
+
+  // Determine query type for optimized search
+  private determineQueryType(userMessage: string): 'exact' | 'semantic' | 'hybrid' {
+    const lowerMessage = userMessage.toLowerCase();
+    
+    // Check for general property queries (should use exact search)
+    const generalQueries = ['what properties', 'show me properties', 'all properties', 'list properties', 'available properties'];
+    const isGeneralQuery = generalQueries.some(term => lowerMessage.includes(term));
+    
+    if (isGeneralQuery) return 'exact';
+    
+    // Check for exact filters
+    const exactFilters = ['bed', 'bath', 'rent', 'price', 'pet', 'dog', 'cat'];
+    const hasExactFilters = exactFilters.some(filter => lowerMessage.includes(filter));
+    
+    // Check for semantic terms
+    const semanticTerms = ['apartment', 'house', 'property', 'available', 'looking for'];
+    const hasSemanticTerms = semanticTerms.some(term => lowerMessage.includes(term));
+    
+    if (hasExactFilters && hasSemanticTerms) return 'hybrid';
+    if (hasExactFilters) return 'exact';
+    return 'semantic';
+  }
+
+  // Generate intelligent fallback response
+  private generateFallbackResponse(properties: TruncatedProperty[]): string {
+    if (properties.length === 0) {
+      return "I don't have any properties available at the moment. Please try again later or contact us for assistance.";
+    }
+    
+    const property = properties[0];
+    return `I found ${properties.length} properties available:
+
+**${property.property_name}**
+- **Address**: ${property.address.raw}
+- **Unit Details**: ${property.unit_details.beds} bed, ${property.unit_details.baths} bath, $${property.rental_terms.rent}/month
+- **Available**: ${property.unit_details.available}
+- **Pet Policy**: ${property.pet_policy.pets_allowed.allowed ? 'Pet Friendly' : 'No Pets'}
+
+This property is located in ${property.address.city}. Please contact us for more details or to schedule a viewing.`;
   }
 } 

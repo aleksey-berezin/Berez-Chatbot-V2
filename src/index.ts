@@ -25,6 +25,12 @@ app.use('/*', serveStatic({ root: './public' }));
 // Health check
 app.get('/', (c) => c.json({ status: 'ok', region: config.server.region }));
 
+// Performance monitoring endpoint
+app.get('/performance', (c) => {
+  const stats = chatbot.getPerformanceStats();
+  return c.json(stats);
+});
+
 // Redis connection test
 app.get('/test-redis', async (c) => {
   try {
@@ -178,7 +184,7 @@ app.post('/chat/stream', async (c) => {
               controller.enqueue(new TextEncoder().encode(data));
               
               // Add a small delay to make streaming more visible
-              await new Promise(resolve => setTimeout(resolve, 50)); // 50ms delay
+              await new Promise(resolve => setTimeout(resolve, 30)); // 30ms delay for faster streaming
             }
           }
 
@@ -282,6 +288,69 @@ app.get('/properties', async (c) => {
   } catch (error) {
     console.error('Search error:', error);
     return c.json({ error: 'Internal server error' }, 500);
+  }
+});
+
+// Performance monitoring endpoint
+app.get('/performance', async (c) => {
+  try {
+    const stats = chatbot.getPerformanceStats();
+    return c.json({
+      success: true,
+      performance: stats,
+      timestamp: Date.now()
+    });
+  } catch (error) {
+    console.error('❌ Performance stats error:', error);
+    return c.json({ error: 'Failed to get performance stats' }, 500);
+  }
+});
+
+// Network latency testing endpoint
+app.get('/network-test', async (c) => {
+  try {
+    const results = {
+      timestamp: Date.now(),
+      redis: { connected: false, latency: 0 },
+      openai: { connected: false, latency: 0 }
+    };
+
+    // Test Redis latency
+    try {
+      const redisStart = Date.now();
+      const redisConnected = await chatbot.getRedisService().testConnection();
+      results.redis = {
+        connected: redisConnected,
+        latency: Date.now() - redisStart
+      };
+    } catch (error) {
+      console.error('❌ Redis test failed:', error);
+    }
+
+    // Test OpenAI latency (simple ping)
+    try {
+      const openaiStart = Date.now();
+      const response = await fetch('https://api.openai.com/v1/models', {
+        headers: {
+          'Authorization': `Bearer ${config.openai.apiKey}`,
+          'Content-Type': 'application/json'
+        }
+      });
+      results.openai = {
+        connected: response.ok,
+        latency: Date.now() - openaiStart
+      };
+    } catch (error) {
+      console.error('❌ OpenAI test failed:', error);
+    }
+
+    return c.json({
+      success: true,
+      network: results
+    });
+  } catch (error) {
+    console.error('❌ Network test error:', error);
+    return c.json({ error: 'Network test failed' }, 500);
   }
 });
 

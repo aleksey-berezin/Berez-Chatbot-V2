@@ -8,7 +8,7 @@ export const config = {
   },
   openai: {
     apiKey: process.env.OPENAI_API_KEY || '',
-    model: 'gpt-4o-mini',
+    model: 'gpt-3.5-turbo',
     embeddingModel: 'text-embedding-3-small'
   },
   server: {

@@ -16,28 +16,73 @@ export class OpenAIService {
     });
   }
 
-  // Fast chat completion with optimizations
+  // Retry with exponential backoff
+  private async retryWithBackoff<T>(
+    operation: () => Promise<T>,
+    maxRetries: number = 3,
+    baseDelay: number = 1000
+  ): Promise<T> {
+    let lastError: any;
+    
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        return await operation();
+      } catch (error: any) {
+        lastError = error;
+        
+        // Don't retry on certain errors
+        if (error?.status === 400 || error?.status === 401 || error?.status === 403) {
+          console.error(`❌ OpenAI error (not retrying): ${error.status} - ${error.message}`);
+          throw error;
+        }
+        
+        // Check for rate limit
+        if (error?.status === 429) {
+          const retryAfter = error.headers?.['retry-after'] || baseDelay;
+          console.warn(`⚠️ OpenAI rate limit hit, retrying after ${retryAfter}ms (attempt ${attempt + 1}/${maxRetries + 1})`);
+          await new Promise(resolve => setTimeout(resolve, retryAfter));
+          continue;
+        }
+        
+        // Exponential backoff for other errors
+        if (attempt < maxRetries) {
+          const delay = baseDelay * Math.pow(2, attempt);
+          console.warn(`⚠️ OpenAI error, retrying in ${delay}ms (attempt ${attempt + 1}/${maxRetries + 1}): ${error.message}`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+        }
+      }
+    }
+    
+    console.error(`❌ OpenAI failed after ${maxRetries + 1} attempts:`, lastError);
+    throw lastError;
+  }
+
+  // Fast chat completion with optimizations and retry logic
   async chat(messages: any[], stream = false): Promise<{ content: string; usage: any } | any> {
     const cacheKey = this.generateCacheKey(messages);
     
-    // Check cache first
-    const cached = this.responseCache.get(cacheKey);
-    if (cached) {
-      console.log('📦 Using cached response');
-      return { content: cached, usage: null };
+    // Check cache first (only for non-streaming)
+    if (!stream) {
+      const cached = this.responseCache.get(cacheKey);
+      if (cached) {
+        console.log('📦 Using cached response');
+        return { content: cached, usage: null };
+      }
     }
 
     const startTime = Date.now();
     
     try {
-      const response = await this.client.chat.completions.create({
-        model: config.openai.model,
-        messages,
-        stream,
-        max_tokens: 1000, // Restored for complete responses
-        temperature: 0.1, // Very low for consistent, fast responses
-        presence_penalty: 0, // Disable for faster generation
-        frequency_penalty: 0, // Disable for faster generation
+      const response = await this.retryWithBackoff(async () => {
+        return await this.client.chat.completions.create({
+          model: config.openai.model,
+          messages,
+          stream: stream,
+          max_tokens: 300, // Reduced for faster responses
+          temperature: 0.1, // Very low for consistent, fast responses
+          presence_penalty: 0, // Disable for faster generation
+          frequency_penalty: 0, // Disable for faster generation
+        });
       });
 
       const responseTime = Date.now() - startTime;
@@ -46,18 +91,21 @@ export class OpenAIService {
       if (stream) {
         return response;
       } else {
-        // Type guard to ensure we have a non-stream response
-        if ('choices' in response) {
-          const content = response.choices[0]?.message?.content || '';
-          const usage = response.usage;
+        // Handle non-streaming response properly
+        if (response && typeof response === 'object' && 'choices' in response) {
+          const typedResponse = response as any;
+          const content = typedResponse.choices[0]?.message?.content || '';
+          const usage = typedResponse.usage || null;
           
           // Cache the response
           this.responseCache.set(cacheKey, content);
           setTimeout(() => this.responseCache.delete(cacheKey), this.cacheTimeout);
           
           return { content, usage };
+        } else {
+          console.error('❌ Unexpected response format:', response);
+          return { content: 'Sorry, I encountered an error processing your request.', usage: null };
         }
-        return { content: '', usage: null };
       }
     } catch (error) {
       console.error('OpenAI API error:', error);
@@ -65,33 +113,33 @@ export class OpenAIService {
     }
   }
 
-
-
-
-
   // Generate cache key for messages
   private generateCacheKey(messages: any[]): string {
     return messages.map(m => `${m.role}:${m.content}`).join('|');
   }
 
-  // Streaming chat completion for real-time responses
+  // Streaming chat completion for real-time responses with retry logic
   async chatStream(messages: any[]) {
-    return await this.client.chat.completions.create({
-      model: config.openai.model,
-      messages,
-      stream: true,
-      max_tokens: 1000, // Restored for complete streaming responses
-      temperature: 0.3,
-      presence_penalty: 0,
-      frequency_penalty: 0,
+    return await this.retryWithBackoff(async () => {
+      return await this.client.chat.completions.create({
+        model: config.openai.model,
+        messages,
+        stream: true,
+        max_tokens: 300, // Reduced for faster streaming responses
+        temperature: 0.1, // Consistent with non-streaming
+        presence_penalty: 0,
+        frequency_penalty: 0,
+      });
     });
   }
 
-  // Fast embeddings for semantic search
+  // Fast embeddings for semantic search with retry logic
   async getEmbedding(text: string): Promise<number[]> {
-    const response = await this.client.embeddings.create({
-      model: config.openai.embeddingModel,
-      input: text
+    const response = await this.retryWithBackoff(async () => {
+      return await this.client.embeddings.create({
+        model: config.openai.embeddingModel,
+        input: text
+      });
     });
 
     return response.data[0]?.embedding || [];
