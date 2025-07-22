@@ -6,6 +6,7 @@ import { ChatMessage, ChatSession, Property, SearchQuery } from '../types';
 export class ChatbotService {
   private redis: RedisService;
   private openai: OpenAIService;
+  private isConnected = false;
 
   constructor() {
     this.redis = new RedisService();
@@ -13,11 +14,20 @@ export class ChatbotService {
   }
 
   async connect() {
-    await this.redis.connect();
+    try {
+      await this.redis.connect();
+      this.isConnected = true;
+    } catch (error) {
+      console.error('Failed to connect to Redis:', error);
+      this.isConnected = false;
+    }
   }
 
   async disconnect() {
-    await this.redis.disconnect();
+    if (this.isConnected) {
+      await this.redis.disconnect();
+      this.isConnected = false;
+    }
   }
 
   // Main chat handler - fast path
@@ -25,24 +35,25 @@ export class ChatbotService {
     const startTime = Date.now();
 
     try {
+      // Ensure Redis connection
+      if (!this.isConnected) {
+        await this.connect();
+      }
+
       // Get or create session
       const session = await this.getOrCreateSession(sessionId);
       
-      // Analyze query for hybrid search
-      const queryType = await this.openai.analyzeQuery(userMessage);
-      const filters = await this.openai.extractFilters(userMessage);
-      
-      // Perform search
+      // Analyze query and search properties
       const searchQuery: SearchQuery = {
-        type: queryType,
+        type: 'hybrid',
         query: userMessage,
-        filters
+        filters: this.extractFilters(userMessage)
       };
       
       const searchResult = await this.redis.searchProperties(searchQuery);
       
-      // Generate response
-      const response = await this.generateResponse(userMessage, searchResult.properties);
+      // Generate response based on search results
+      const response = this.generateResponse(userMessage, searchResult.properties);
       
       // Update session
       session.messages.push({
@@ -72,65 +83,120 @@ export class ChatbotService {
 
   // Add property to database
   async addProperty(property: Property): Promise<void> {
-    await this.redis.storeProperty(property);
-    
-    // Generate and store embedding for semantic search
-    const description = `${property.name} ${property.address} ${property.description || ''}`;
-    const embedding = await this.openai.getEmbedding(description);
-    await this.redis.storeEmbedding(property.id, embedding);
+    try {
+      if (!this.isConnected) {
+        await this.connect();
+      }
+      
+      await this.redis.storeProperty(property);
+      console.log(`Property ${property.property_name} added successfully`);
+    } catch (error) {
+      console.error('Failed to add property:', error);
+      throw error;
+    }
   }
 
   // Search properties
   async searchProperties(query: string): Promise<any> {
-    const queryType = await this.openai.analyzeQuery(query);
-    const filters = await this.openai.extractFilters(query);
-    
-    const searchQuery: SearchQuery = {
-      type: queryType,
-      query,
-      filters
-    };
-    
-    return await this.redis.searchProperties(searchQuery);
+    try {
+      if (!this.isConnected) {
+        await this.connect();
+      }
+
+      const searchQuery: SearchQuery = {
+        type: 'semantic',
+        query,
+        filters: this.extractFilters(query)
+      };
+      
+      return await this.redis.searchProperties(searchQuery);
+    } catch (error) {
+      console.error('Search error:', error);
+      return { properties: [], query: { type: 'semantic', query }, latency: 0, cacheHit: false };
+    }
   }
 
   private async getOrCreateSession(sessionId: string): Promise<ChatSession> {
-    let session = await this.redis.getSession(sessionId);
-    
-    if (!session) {
-      session = {
+    try {
+      let session = await this.redis.getSession(sessionId);
+      
+      if (!session) {
+        session = {
+          id: sessionId,
+          messages: [],
+          createdAt: Date.now(),
+          updatedAt: Date.now()
+        };
+        await this.redis.storeSession(session);
+      }
+      
+      return session;
+    } catch (error) {
+      console.error('Session error:', error);
+      // Return a default session if Redis fails
+      return {
         id: sessionId,
         messages: [],
         createdAt: Date.now(),
         updatedAt: Date.now()
       };
-      await this.redis.storeSession(session);
     }
-    
-    return session;
   }
 
-  private async generateResponse(userQuery: string, properties: Property[]): Promise<string> {
-    if (properties.length === 0) {
-      return "I couldn't find any properties matching your criteria. Try adjusting your search terms.";
+  private extractFilters(query: string): SearchQuery['filters'] {
+    const filters: SearchQuery['filters'] = {};
+    const lowerQuery = query.toLowerCase();
+
+    // Extract bed count
+    const bedMatch = lowerQuery.match(/(\d+)\s*(?:bed|bedroom)/);
+    if (bedMatch) {
+      filters.beds = parseInt(bedMatch[1]);
     }
-    
-    const propertyList = properties.slice(0, 5).map(p => 
-      `• ${p.name}: ${p.beds}bd/${p.baths}ba, $${p.rent}/month, ${p.address}`
-    ).join('\n');
-    
-    const messages = [
-      {
-        role: 'system' as const,
-        content: 'You are a helpful real estate assistant. Provide concise, friendly responses about available properties.'
-      },
-      {
-        role: 'user' as const,
-        content: `Query: "${userQuery}"\n\nAvailable properties:\n${propertyList}\n\nProvide a helpful response about these properties.`
+
+    // Extract bath count
+    const bathMatch = lowerQuery.match(/(\d+(?:\.\d+)?)\s*(?:bath|bathroom)/);
+    if (bathMatch) {
+      filters.baths = parseFloat(bathMatch[1]);
+    }
+
+    // Extract rent range
+    const rentMatch = lowerQuery.match(/\$?(\d+)(?:\s*-\s*\$?(\d+))?/);
+    if (rentMatch) {
+      filters.rent = {
+        min: parseInt(rentMatch[1]),
+        max: rentMatch[2] ? parseInt(rentMatch[2]) : undefined
+      };
+    }
+
+    // Extract city
+    const cities = ['portland', 'fairview', 'beaverton', 'gresham'];
+    for (const city of cities) {
+      if (lowerQuery.includes(city)) {
+        filters.city = city;
+        break;
       }
-    ];
-    
-    const response = await this.openai.chat(messages);
-    return response.toString();
+    }
+
+    // Extract pet policy
+    if (lowerQuery.includes('pet') || lowerQuery.includes('dog') || lowerQuery.includes('cat')) {
+      filters.pets_allowed = true;
+    }
+
+    return filters;
+  }
+
+  private generateResponse(userQuery: string, properties: Property[]): string {
+    if (properties.length === 0) {
+      return "I couldn't find any properties matching your criteria. Try adjusting your search terms or ask me about available properties in Portland, Fairview, or other areas.";
+    }
+
+    const propertyList = properties.slice(0, 3).map(p => 
+      `• ${p.property_name}: ${p.unit_details.beds}bd/${p.unit_details.baths}ba, $${p.rental_terms.rent}/month, ${p.address.city}, ${p.unit_details.square_feet}sqft`
+    ).join('\n');
+
+    const totalCount = properties.length;
+    const moreText = totalCount > 3 ? `\n\nI found ${totalCount} total properties. Would you like to see more details about any specific property?` : '';
+
+    return `Here are some properties that match your search:\n\n${propertyList}${moreText}\n\nYou can ask me about specific details like pet policies, amenities, or availability!`;
   }
 } 

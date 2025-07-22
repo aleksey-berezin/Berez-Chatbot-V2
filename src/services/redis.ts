@@ -19,9 +19,21 @@ export class RedisService {
     await this.client.disconnect();
   }
 
+  // Fast connection test
+  async testConnection(): Promise<boolean> {
+    try {
+      await this.client.set('test', 'ok');
+      const result = await this.client.get('test');
+      await this.client.del('test');
+      return result === 'ok';
+    } catch {
+      return false;
+    }
+  }
+
   // JSON storage for exact queries
   async storeProperty(property: Property) {
-    await this.client.json.set(`property:${property.id}`, '$', property as any);
+    await this.client.json.set(`property:${property.listing_urls.listing_id}`, '$', property as any);
   }
 
   async getProperty(id: string): Promise<Property | null> {
@@ -96,9 +108,54 @@ export class RedisService {
     };
   }
 
-  private matchesFilters(property: Property, filters: Partial<Property>): boolean {
-    return Object.entries(filters).every(([key, value]) => {
-      return property[key as keyof Property] === value;
-    });
+  private matchesFilters(property: Property, filters: SearchQuery['filters']): boolean {
+    if (!filters) return true;
+
+    // Check beds
+    if (filters.beds && property.unit_details.beds !== filters.beds) {
+      return false;
+    }
+
+    // Check baths
+    if (filters.baths && property.unit_details.baths !== filters.baths) {
+      return false;
+    }
+
+    // Check rent range
+    if (filters.rent) {
+      const rent = property.rental_terms.rent;
+      if (filters.rent.min && rent < filters.rent.min) return false;
+      if (filters.rent.max && rent > filters.rent.max) return false;
+    }
+
+    // Check city
+    if (filters.city && property.address.city.toLowerCase() !== filters.city.toLowerCase()) {
+      return false;
+    }
+
+    // Check pets allowed
+    if (filters.pets_allowed !== undefined && property.pet_policy.pets_allowed.allowed !== filters.pets_allowed) {
+      return false;
+    }
+
+    // Check square feet range
+    if (filters.square_feet) {
+      const sqft = property.unit_details.square_feet;
+      if (filters.square_feet.min && sqft < filters.square_feet.min) return false;
+      if (filters.square_feet.max && sqft > filters.square_feet.max) return false;
+    }
+
+    return true;
+  }
+
+  // Load sample data
+  async loadSampleData(properties: Property[]): Promise<void> {
+    console.log(`Loading ${properties.length} properties into Redis...`);
+    
+    for (const property of properties) {
+      await this.storeProperty(property);
+    }
+    
+    console.log('Sample data loaded successfully!');
   }
 } 
