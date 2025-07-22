@@ -9,6 +9,7 @@ Fast hybrid search chatbot with Redis and OpenAI, optimized for Portland region.
 - **OpenAI Integration**: Direct API for speed
 - **Portland Region**: pdx1 edge + us-west-2 Redis
 - **Session Management**: Persistent conversations
+- **Environment Management**: dotenv for configuration
 
 ## 🏗️ Architecture
 
@@ -17,6 +18,7 @@ Fast hybrid search chatbot with Redis and OpenAI, optimized for Portland region.
 - **Redis**: JSON + Vector storage
 - **OpenAI**: GPT-4o-mini + embeddings
 - **TypeScript**: Type safety
+- **dotenv**: Environment variable management
 
 ### Data Flow
 1. User query → Query analysis
@@ -34,45 +36,60 @@ npm install
 
 ### 2. Environment Setup
 ```bash
+# Copy the example environment file
 cp env.example .env
-# Edit .env with your Redis and OpenAI keys
+
+# Edit .env with your actual credentials
+# REDIS_URL=your_redis_url
+# OPENAI_API_KEY=your_openai_api_key
+# PORT=3000
 ```
 
-### 3. Start Development
+### 3. Development
 ```bash
+# Start development server
 npm run dev
+
+# Type check
+npm run type-check
 ```
 
-### 4. Seed Sample Data
+### 4. Production
 ```bash
-curl -X POST http://localhost:3000/seed
+# Build the project
+npm run build
+
+# Start production server
+npm start
 ```
 
-### 5. Test Chat
-```bash
-curl -X POST http://localhost:3000/chat \
-  -H "Content-Type: application/json" \
-  -d '{"message": "Show me 2 bedroom apartments under $2000"}'
+## 🔧 Configuration
+
+The project uses [dotenv](https://github.com/motdotla/dotenv) to load environment variables from `.env` file:
+
+- **REDIS_URL**: Redis connection string
+- **OPENAI_API_KEY**: Your OpenAI API key
+- **PORT**: Server port (default: 3000)
+
+## 📁 Project Structure
+
+```
+src/
+├── types.ts          # TypeScript type definitions
+├── config.ts         # Environment configuration
+├── index.ts          # Main server entry point
+└── services/
+    ├── redis.ts      # Redis hybrid search service
+    ├── openai.ts     # OpenAI API integration
+    └── chatbot.ts    # Main chatbot logic
 ```
 
-## 📊 Performance Targets
-
-- **Response Time**: < 700ms
-- **Redis Latency**: < 10ms
-- **Cache Hit Rate**: > 60%
-
-## 🔧 API Endpoints
+## 🚀 API Endpoints
 
 - `GET /` - Health check
-- `POST /chat` - Chat with bot
-- `POST /seed` - Seed sample data
-
-## 🎯 Next Steps
-
-1. **Redis Cloud Pro** setup
-2. **Vector embeddings** implementation
-3. **LangCache** integration
-4. **Vercel deployment**
+- `POST /chat` - Chat with the bot
+- `POST /properties` - Add property data
+- `GET /properties` - Search properties
 
 ## 📝 License
 

@@ -39,34 +39,32 @@ app.post('/chat', async (c) => {
   }
 });
 
-// Seed data endpoint
-app.post('/seed', async (c) => {
+// Properties endpoint
+app.post('/properties', async (c) => {
   try {
-    await chatbot.seedSampleData();
-    return c.json({ message: 'Sample data seeded successfully' });
+    const property = await c.req.json();
+    await chatbot.addProperty(property);
+    return c.json({ success: true });
   } catch (error) {
-    console.error('Seed error:', error);
-    return c.json({ error: 'Failed to seed data' }, 500);
+    console.error('Property error:', error);
+    return c.json({ error: 'Internal server error' }, 500);
+  }
+});
+
+// Search properties endpoint
+app.get('/properties', async (c) => {
+  try {
+    const query = c.req.query('q') || '';
+    const results = await chatbot.searchProperties(query);
+    return c.json(results);
+  } catch (error) {
+    console.error('Search error:', error);
+    return c.json({ error: 'Internal server error' }, 500);
   }
 });
 
 // Start server
-const start = async () => {
-  try {
-    await chatbot.connect();
-    console.log(`🚀 Server starting on port ${config.server.port}`);
-    console.log(`📍 Region: ${config.server.region}`);
-    
-    Bun.serve({
-      port: config.server.port,
-      fetch: app.fetch
-    });
-    
-    console.log(`✅ Server running at http://localhost:${config.server.port}`);
-  } catch (error) {
-    console.error('Failed to start server:', error);
-    process.exit(1);
-  }
-};
+const port = config.server.port;
+console.log(`🚀 Server running on port ${port} in ${config.server.region} region`);
 
-start(); 
+export default app; 

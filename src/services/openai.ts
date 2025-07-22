@@ -21,7 +21,15 @@ export class OpenAIService {
       temperature: 0.7
     });
 
-    return stream ? response : response.choices[0]?.message?.content || '';
+    if (stream) {
+      return response;
+    } else {
+      // Type guard to ensure we have a non-stream response
+      if ('choices' in response) {
+        return response.choices[0]?.message?.content || '';
+      }
+      return '';
+    }
   }
 
   // Fast embeddings for semantic search
@@ -34,57 +42,45 @@ export class OpenAIService {
     return response.data[0]?.embedding || [];
   }
 
-  // Query analysis for hybrid search
-  async analyzeQuery(userQuery: string): Promise<SearchQuery> {
-    const prompt = `
-    Analyze this real estate query and determine the search type:
-    Query: "${userQuery}"
-    
-    Return JSON with:
-    - type: "exact", "semantic", or "hybrid"
-    - query: the original query
-    - filters: any specific criteria (beds, baths, rent range, etc.)
-    
-    Examples:
-    - "2 bedroom apartments under $2000" → exact with filters
-    - "luxury apartments downtown" → semantic
-    - "pet-friendly places near parks" → hybrid
-    `;
+  // Analyze query type for hybrid search
+  async analyzeQuery(query: string): Promise<'exact' | 'semantic' | 'hybrid'> {
+    const messages = [
+      {
+        role: 'system' as const,
+        content: 'Analyze if this query contains specific filters (exact) or is natural language (semantic). Respond with "exact", "semantic", or "hybrid".'
+      },
+      {
+        role: 'user' as const,
+        content: query
+      }
+    ];
 
-    const response = await this.chat([
-      { role: 'system', content: 'You are a real estate query analyzer. Return only valid JSON.' },
-      { role: 'user', content: prompt }
-    ]);
-
-    try {
-      return JSON.parse(response);
-    } catch {
-      // Fallback to semantic search
-      return {
-        type: 'semantic',
-        query: userQuery
-      };
-    }
+    const response = await this.chat(messages);
+    const result = response.toString().toLowerCase().trim();
+    
+    if (result.includes('exact')) return 'exact';
+    if (result.includes('semantic')) return 'semantic';
+    return 'hybrid';
   }
 
-  // Generate property recommendations
-  async generateRecommendations(properties: Property[], userQuery: string): Promise<string> {
-    const propertyList = properties.map(p => 
-      `${p.name}: ${p.beds}bd/${p.baths}ba, $${p.rent}/month, ${p.address}`
-    ).join('\n');
+  // Generate property search filters from query
+  async extractFilters(query: string): Promise<Partial<Property>> {
+    const messages = [
+      {
+        role: 'system' as const,
+        content: 'Extract property filters from the query. Return only a JSON object with filters like {beds: 2, rent: 2000}.'
+      },
+      {
+        role: 'user' as const,
+        content: query
+      }
+    ];
 
-    const prompt = `
-    Based on this query: "${userQuery}"
-    
-    Here are available properties:
-    ${propertyList}
-    
-    Provide a helpful, concise response recommending the best matches.
-    `;
-
-    return await this.chat([
-      { role: 'system', content: 'You are a helpful real estate assistant.' },
-      { role: 'user', content: prompt }
-    ]);
+    const response = await this.chat(messages);
+    try {
+      return JSON.parse(response.toString());
+    } catch {
+      return {};
+    }
   }
 } 

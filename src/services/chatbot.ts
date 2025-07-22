@@ -29,31 +29,73 @@ export class ChatbotService {
       const session = await this.getOrCreateSession(sessionId);
       
       // Analyze query for hybrid search
-      const searchQuery = await this.openai.analyzeQuery(userMessage);
+      const queryType = await this.openai.analyzeQuery(userMessage);
+      const filters = await this.openai.extractFilters(userMessage);
       
-      // Search properties
-      const searchResult = await this.redis.search(searchQuery);
+      // Perform search
+      const searchQuery: SearchQuery = {
+        type: queryType,
+        query: userMessage,
+        filters
+      };
+      
+      const searchResult = await this.redis.searchProperties(searchQuery);
       
       // Generate response
-      const response = await this.openai.generateRecommendations(
-        searchResult.properties, 
-        userMessage
-      );
-
+      const response = await this.generateResponse(userMessage, searchResult.properties);
+      
       // Update session
-      await this.updateSession(sessionId, userMessage, response);
-
-      console.log(`Response time: ${Date.now() - startTime}ms`);
+      session.messages.push({
+        id: uuidv4(),
+        role: 'user',
+        content: userMessage,
+        timestamp: Date.now()
+      });
+      
+      session.messages.push({
+        id: uuidv4(),
+        role: 'assistant',
+        content: response,
+        timestamp: Date.now()
+      });
+      
+      session.updatedAt = Date.now();
+      await this.redis.storeSession(session);
+      
       return response;
-
+      
     } catch (error) {
-      console.error('Chatbot error:', error);
-      return "I'm having trouble processing your request. Please try again.";
+      console.error('Chat error:', error);
+      return 'Sorry, I encountered an error. Please try again.';
     }
   }
 
+  // Add property to database
+  async addProperty(property: Property): Promise<void> {
+    await this.redis.storeProperty(property);
+    
+    // Generate and store embedding for semantic search
+    const description = `${property.name} ${property.address} ${property.description || ''}`;
+    const embedding = await this.openai.getEmbedding(description);
+    await this.redis.storeEmbedding(property.id, embedding);
+  }
+
+  // Search properties
+  async searchProperties(query: string): Promise<any> {
+    const queryType = await this.openai.analyzeQuery(query);
+    const filters = await this.openai.extractFilters(query);
+    
+    const searchQuery: SearchQuery = {
+      type: queryType,
+      query,
+      filters
+    };
+    
+    return await this.redis.searchProperties(searchQuery);
+  }
+
   private async getOrCreateSession(sessionId: string): Promise<ChatSession> {
-    let session = await this.redis.getSession(sessionId) as ChatSession;
+    let session = await this.redis.getSession(sessionId);
     
     if (!session) {
       session = {
@@ -62,74 +104,33 @@ export class ChatbotService {
         createdAt: Date.now(),
         updatedAt: Date.now()
       };
-      await this.redis.storeSession(sessionId, session);
+      await this.redis.storeSession(session);
     }
     
     return session;
   }
 
-  private async updateSession(sessionId: string, userMessage: string, assistantResponse: string) {
-    const session = await this.getOrCreateSession(sessionId);
+  private async generateResponse(userQuery: string, properties: Property[]): Promise<string> {
+    if (properties.length === 0) {
+      return "I couldn't find any properties matching your criteria. Try adjusting your search terms.";
+    }
     
-    const userMsg: ChatMessage = {
-      id: uuidv4(),
-      role: 'user',
-      content: userMessage,
-      timestamp: Date.now()
-    };
-
-    const assistantMsg: ChatMessage = {
-      id: uuidv4(),
-      role: 'assistant',
-      content: assistantResponse,
-      timestamp: Date.now()
-    };
-
-    session.messages.push(userMsg, assistantMsg);
-    session.updatedAt = Date.now();
+    const propertyList = properties.slice(0, 5).map(p => 
+      `• ${p.name}: ${p.beds}bd/${p.baths}ba, $${p.rent}/month, ${p.address}`
+    ).join('\n');
     
-    await this.redis.storeSession(sessionId, session);
-  }
-
-  // Seed sample data
-  async seedSampleData() {
-    const sampleProperties: Property[] = [
+    const messages = [
       {
-        id: '1',
-        name: 'Downtown Luxury Apartments',
-        address: '123 Main St, Portland, OR',
-        beds: 2,
-        baths: 2,
-        rent: 2500,
-        available: true,
-        description: 'Luxury 2-bedroom apartment in downtown Portland with city views'
+        role: 'system' as const,
+        content: 'You are a helpful real estate assistant. Provide concise, friendly responses about available properties.'
       },
       {
-        id: '2',
-        name: 'Riverside Studios',
-        address: '456 River Rd, Portland, OR',
-        beds: 1,
-        baths: 1,
-        rent: 1500,
-        available: true,
-        description: 'Cozy studio apartment near the river with modern amenities'
-      },
-      {
-        id: '3',
-        name: 'Parkview Family Homes',
-        address: '789 Park Ave, Portland, OR',
-        beds: 3,
-        baths: 2,
-        rent: 3200,
-        available: true,
-        description: 'Spacious 3-bedroom home near parks and schools'
+        role: 'user' as const,
+        content: `Query: "${userQuery}"\n\nAvailable properties:\n${propertyList}\n\nProvide a helpful response about these properties.`
       }
     ];
-
-    for (const property of sampleProperties) {
-      await this.redis.storeProperty(property);
-    }
-
-    console.log('Sample data seeded');
+    
+    const response = await this.openai.chat(messages);
+    return response.toString();
   }
 } 

@@ -1,12 +1,6 @@
-// Environment configuration
-declare const process: {
-  env: {
-    REDIS_URL?: string;
-    OPENAI_API_KEY?: string;
-    PORT?: string;
-  };
-};
+import 'dotenv/config';
 
+// Environment configuration
 export const config = {
   redis: {
     url: process.env.REDIS_URL || 'redis://localhost:6379',
