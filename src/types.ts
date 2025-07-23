@@ -80,7 +80,7 @@ export interface ChatSession {
 }
 
 export interface SearchQuery {
-  type: 'exact' | 'semantic' | 'hybrid';
+  type: 'exact' | 'semantic' | 'hybrid' | 'choice' | 'action';
   query: string;
   filters?: {
     beds?: number;

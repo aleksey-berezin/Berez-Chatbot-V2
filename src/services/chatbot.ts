@@ -3,6 +3,8 @@ import { LRUCache } from 'lru-cache';
 import { RedisService } from './redis';
 import { OpenAIService } from './openai';
 import { ChatMessage, ChatSession, Property, SearchQuery } from '../types';
+import { Logger } from '../utils/logger';
+import { ResponseGenerator, ResponseContext, ResponseResult, TruncatedProperty } from './response-generator';
 
 // Performance monitoring interface
 interface PerformanceMetrics {
@@ -19,33 +21,39 @@ interface PerformanceMetrics {
   propertiesFound: number;
 }
 
-// Truncated property interface for token optimization
-interface TruncatedProperty {
-  property_name: string;
-  address: {
-    raw: string;
-    city: string;
+// In-memory cache for property markdown links
+const propertyLinkCache: Record<string, {view: string, tour: string, apply: string}> = {};
+
+function getUnitLabel(property: any) {
+  if (property.unit_details && property.unit_details.unit_number) {
+    return `Unit ${property.unit_details.unit_number}`;
+  }
+  return '';
+}
+
+function cachePropertyLinks(property: any) {
+  const name = property.property_name || '';
+  const unit = getUnitLabel(property);
+  const label = [name, unit].filter(Boolean).join(' ');
+  propertyLinkCache[property.listing_urls.listing_id] = {
+    view: `[View Details for ${label}](${property.listing_urls.view_details_url})`,
+    tour: `[Schedule a tour for ${label}](${property.listing_urls.schedule_showing_url})`,
+    apply: `[Apply now for ${label}](${property.listing_urls.apply_now_url})`
   };
-  unit_details: {
-    beds: number;
-    baths: number;
-    available: string;
-    square_feet: number;
-  };
-  rental_terms: {
-    rent: number;
-    security_deposit: number;
-  };
-  pet_policy: {
-    pets_allowed: {
-      allowed: boolean;
-    };
-  };
+  Logger.debug(`Cached links for property ${property.listing_urls.listing_id}: ${label}`);
+}
+
+// On property load/update, cache links
+function cacheAllPropertyLinks(properties: any[]) {
+  Logger.debug(`Caching links for ${properties.length} properties`);
+  properties.forEach(cachePropertyLinks);
+  Logger.debug(`Property link cache now has ${Object.keys(propertyLinkCache).length} entries`);
 }
 
 export class ChatbotService {
   private redis: RedisService;
   private openai: OpenAIService;
+  private responseGenerator: ResponseGenerator;
   private isConnected = false;
   
   // Replace Map with LRU Cache for better memory management
@@ -63,6 +71,7 @@ export class ChatbotService {
   constructor() {
     this.redis = new RedisService();
     this.openai = new OpenAIService();
+    this.responseGenerator = ResponseGenerator.getInstance();
   }
 
   async connect() {
@@ -101,41 +110,31 @@ export class ChatbotService {
   }
 
   // Truncate property data to stay within token limits
-  private truncatePropertyData(properties: Property[], maxTokens: number = 2000): TruncatedProperty[] {
+  private truncatePropertyData(properties: Property[], maxTokens: number = 4000): TruncatedProperty[] {
     const truncatedProperties: TruncatedProperty[] = properties.map(p => ({
       property_name: p.property_name,
-      address: {
-        raw: p.address.raw,
-        city: p.address.city
-      },
-      unit_details: {
-        beds: p.unit_details.beds,
-        baths: p.unit_details.baths,
-        available: p.unit_details.available,
-        square_feet: p.unit_details.square_feet
-      },
-      rental_terms: {
-        rent: p.rental_terms.rent,
-        security_deposit: p.rental_terms.security_deposit
-      },
-      pet_policy: {
-        pets_allowed: {
-          allowed: p.pet_policy.pets_allowed.allowed
-        }
-      }
-      // Removed: utilities, appliances, photos, urls to save tokens
+      address: p.address,
+      unit_details: p.unit_details,
+      rental_terms: p.rental_terms,
+      pet_policy: p.pet_policy,
+      utilities_included: p.utilities_included,
+      appliances: p.appliances,
+      photos: p.photos,
+      listing_urls: p.listing_urls,
+      special_offer: p.special_offer
+      // Include ALL data for comprehensive responses
     }));
 
     // Estimate total tokens
     const jsonString = JSON.stringify(truncatedProperties);
     const estimatedTokens = this.estimateTokens(jsonString);
     
-    console.log(`🧠 Token estimation: ${estimatedTokens} tokens for ${properties.length} properties`);
+    Logger.debug(`Token estimation: ${estimatedTokens} tokens for ${properties.length} properties`);
     
     // If still too large, reduce number of properties
     if (estimatedTokens > maxTokens) {
       const maxProperties = Math.floor((maxTokens / estimatedTokens) * properties.length);
-      console.log(`📉 Truncating from ${properties.length} to ${maxProperties} properties`);
+      Logger.debug(`Truncating from ${properties.length} to ${maxProperties} properties`);
       return truncatedProperties.slice(0, maxProperties);
     }
     
@@ -145,7 +144,7 @@ export class ChatbotService {
   // Main chat handler - optimized for performance
   async handleMessage(sessionId: string, userMessage: string): Promise<string> {
     const startTime = Date.now();
-    const metrics: PerformanceMetrics = {
+    let metrics: PerformanceMetrics = {
       redisLatency: 0,
       openaiLatency: 0,
       totalLatency: 0,
@@ -158,7 +157,7 @@ export class ChatbotService {
       const cacheKey = this.normalizeCacheKey(userMessage);
       const cached = this.responseCache.get(cacheKey);
       if (cached && (Date.now() - cached.timestamp) < 2 * 60 * 1000) {
-        console.log('📦 Using cached response');
+        Logger.debug('Using cached response');
         metrics.cacheHit = true;
         metrics.totalLatency = Date.now() - startTime;
         this.recordMetrics(metrics);
@@ -169,63 +168,150 @@ export class ChatbotService {
       const session = await this.getOrCreateSession(sessionId);
       
       // OPTIMIZED: Single Redis search followed by single OpenAI call
-      console.log('🚀 Starting optimized single-pass operations...');
+      Logger.debug('Starting optimized single-pass operations...');
       
-      // Start Redis search with intelligent query type selection
+      // ULTRA-FAST: Direct property access
       const redisStart = Date.now();
-      const searchQuery = {
-        type: this.determineQueryType(userMessage),
+      const searchResult = await this.redis.searchProperties({
+        type: 'exact',
         query: userMessage,
         filters: this.extractFilters(userMessage)
-      };
-      console.log('🔍 Search query:', JSON.stringify(searchQuery, null, 2));
-      const searchResult = await this.redis.searchProperties(searchQuery);
-      metrics.redisLatency = Date.now() - redisStart;
-      console.log(`🔍 Search result: ${searchResult.properties?.length || 0} properties found in ${metrics.redisLatency}ms`);
+      });
+      metrics.redisLatency = searchResult.latency || (Date.now() - redisStart);
+      Logger.debug(`Found ${searchResult.properties?.length || 0} properties in ${metrics.redisLatency}ms`);
       
-      // If no properties found, give a simple response
-      if (!searchResult.properties || searchResult.properties.length === 0) {
-        const response = "I don't have any properties available at the moment. Please try again later or contact us for assistance.";
-        metrics.totalLatency = Date.now() - startTime;
-        this.recordMetrics(metrics);
-        return response;
+      // After loading properties from Redis, cache their links
+      if (searchResult.properties && searchResult.properties.length > 0) {
+        cacheAllPropertyLinks(searchResult.properties);
       }
       
-      // Truncate property data to stay within token limits (reduced to 1200 tokens for faster processing)
-      const truncatedProperties = this.truncatePropertyData(searchResult.properties, 1200);
+      // If no properties found, get all properties
+      if (!searchResult.properties || searchResult.properties.length === 0) {
+        Logger.debug('No properties found, getting all properties...');
+        const allPropertiesResult = await this.redis.searchProperties({
+          type: 'exact',
+          query: '*',
+          filters: {}
+        });
+        
+        if (allPropertiesResult.properties && allPropertiesResult.properties.length > 0) {
+          Logger.debug(`Found ${allPropertiesResult.properties.length} total properties`);
+          searchResult.properties = allPropertiesResult.properties;
+        } else {
+          const response = "I don't have any properties available at the moment. Please try again later or contact us for assistance.";
+          metrics.totalLatency = Date.now() - startTime;
+          this.recordMetrics(metrics);
+          return response;
+        }
+      }
+      
+      // Use OpenAI for intelligent responses
+      const truncatedProperties = this.truncatePropertyData(searchResult.properties, 4000);
       metrics.propertiesFound = truncatedProperties.length;
       
-      // Prepare optimized context for OpenAI
+      // Prepare comprehensive context for OpenAI with full property data
       const messages = [
         {
           role: 'system' as const,
-          content: `You are a real estate assistant. Respond in 2-3 sentences max. Use bullet points. Be direct and helpful.`
+          content: `You are a fast, friendly, and conversion-focused real estate assistant for Lincoln Court. Greet the user by name if possible. Your job is to help prospective tenants find their perfect home and guide them toward scheduling tours or applying.
+
+Key principles:
+- Respond in 1-2 short, engaging sentences ONLY
+- Create urgency for available units ("These go fast!")
+- Provide clear, simple next steps ("Schedule a tour" or "Apply now")
+- Be helpful, never verbose
+- Always answer the user's question directly—do not just list properties
+- Do NOT generate or format links. Only refer to properties by name and unit number. The system will insert the correct links.
+
+For property queries:
+1. Brief excitement about available units
+2. Only the most relevant details (price, location, availability)
+3. End with a clear CTA
+
+If the user greets you, greet them back and offer to help find a home or answer questions.
+If the user asks a specific question, answer it directly and then offer a next step.
+
+Keep responses EXTREMELY FAST, CONCISE, and CONVERSION-FOCUSED.`
         },
         {
           role: 'user' as const,
-          content: `Question: ${userMessage}\n\nProperties: ${JSON.stringify(truncatedProperties)}\n\nAnswer concisely in 2-3 sentences.`
+          content: `Question: ${userMessage}\n\nProperties: ${JSON.stringify(truncatedProperties)}\n\nUse the EXACT format above with basic info only.`
         }
       ];
       
-      // Single OpenAI call with optimized property data
-      const openaiStart = Date.now();
-      console.log('🤖 Making single optimized OpenAI call...');
-      
+      // Generate OpenAI response
       let response = '';
       let usage = null;
+             if (truncatedProperties.length > 0) {
+         Logger.debug('Using OpenAI for property response...');
+         const openaiStart = Date.now();
+         
+         try {
+           const aiResponse = await this.openai.chat(messages, true);
+           response = typeof aiResponse === 'object' && 'content' in aiResponse ? aiResponse.content : '';
+           usage = typeof aiResponse === 'object' && 'usage' in aiResponse ? aiResponse.usage : null;
+           
+           Logger.debug('OpenAI call successful');
+         } catch (error) {
+           Logger.error(`OpenAI call failed: ${error}`);
+           response = "I'm having trouble processing your request right now. Please try again.";
+         }
+         
+         metrics.openaiLatency = Date.now() - openaiStart;
+       } else {
+         // No properties found - use OpenAI for general response
+         Logger.debug('No properties found, using OpenAI for general response...');
+         const openaiStart = Date.now();
+         
+         try {
+           const generalMessages = [
+             {
+               role: 'system' as const,
+               content: `You are a helpful real estate assistant. The user is asking about properties but none were found. Apologize briefly and suggest they try a different search or contact us.`
+             },
+             {
+               role: 'user' as const,
+               content: userMessage
+             }
+           ];
+           
+           const aiResponse = await this.openai.chat(generalMessages, true);
+           response = typeof aiResponse === 'object' && 'content' in aiResponse ? aiResponse.content : '';
+           usage = typeof aiResponse === 'object' && 'usage' in aiResponse ? aiResponse.usage : null;
+           
+           Logger.debug('OpenAI call successful');
+         } catch (error) {
+           Logger.error(`OpenAI call failed: ${error}`);
+           response = "I don't have any properties available at the moment. Please try again later or contact us for assistance.";
+         }
+         
+         metrics.openaiLatency = Date.now() - openaiStart;
+       }
       
-      try {
-        const aiResponse = await this.openai.chat(messages, false);
-        response = typeof aiResponse === 'object' && 'content' in aiResponse ? aiResponse.content : '';
-        usage = typeof aiResponse === 'object' && 'usage' in aiResponse ? aiResponse.usage : null;
-        console.log('✅ OpenAI call successful');
-      } catch (error) {
-        console.error('❌ OpenAI call failed:', error);
-        // Intelligent fallback response
-        response = this.generateFallbackResponse(truncatedProperties);
+      // When generating a response, use cached links for up to 2 properties
+      if (truncatedProperties && truncatedProperties.length > 0) {
+        let fixedResponse = response;
+        truncatedProperties.slice(0, 2).forEach((p) => {
+          const links = propertyLinkCache[p.listing_urls.listing_id];
+          if (links) {
+            fixedResponse = fixedResponse.replace(new RegExp(`\[View Details[^\]]*\]\([^)]*\)`, 'g'), links.view);
+            fixedResponse = fixedResponse.replace(new RegExp(`\[Schedule a tour[^\]]*\]\([^)]*\)`, 'g'), links.tour);
+            fixedResponse = fixedResponse.replace(new RegExp(`\[Apply now[^\]]*\]\([^)]*\)`, 'g'), links.apply);
+          }
+        });
+        
+        // If no links were found in the response, append them for the top 2 properties
+        if (!fixedResponse.includes('[Schedule a tour]') && !fixedResponse.includes('[Apply now]')) {
+          truncatedProperties.slice(0, 2).forEach((p) => {
+            const links = propertyLinkCache[p.listing_urls.listing_id];
+            if (links) {
+              fixedResponse += `\n\n${links.tour} | ${links.apply}`;
+            }
+          });
+        }
+        
+        response = fixedResponse;
       }
-      
-      metrics.openaiLatency = Date.now() - openaiStart;
       
       // Add token usage if available
       if (usage) {
@@ -261,12 +347,7 @@ export class ChatbotService {
       this.recordMetrics(metrics);
       
       // Log performance summary
-      console.log(`📊 Performance Summary:
-        - Total: ${metrics.totalLatency}ms
-        - Redis: ${metrics.redisLatency}ms
-        - OpenAI: ${metrics.openaiLatency}ms
-        - Properties: ${metrics.propertiesFound}
-        - Cache Hit: ${metrics.cacheHit}`);
+      Logger.debug(`Performance Summary: Total=${metrics.totalLatency}ms, Redis=${metrics.redisLatency}ms, OpenAI=${metrics.openaiLatency}ms, Properties=${metrics.propertiesFound}, Cache=${metrics.cacheHit}`);
       
       session.updatedAt = Date.now();
       
@@ -276,11 +357,7 @@ export class ChatbotService {
       );
       
       // Log comprehensive metrics
-      metrics.totalLatency = Date.now() - startTime;
-      console.log(`🤖 SINGLE-PASS RAG METRICS:`);
-      console.log(`  📝 "${userMessage}"`);
-      console.log(`  🏠 Found: ${metrics.propertiesFound} properties`);
-      console.log(`  ⏱️  Redis: ${metrics.redisLatency}ms, OpenAI: ${metrics.openaiLatency}ms, Total: ${metrics.totalLatency}ms`);
+      Logger.debug(`RAG Metrics: "${userMessage}", Found=${metrics.propertiesFound}, Redis=${metrics.redisLatency}ms, OpenAI=${metrics.openaiLatency}ms, Total=${metrics.totalLatency}ms`);
 
       // Log token usage if available
       if (usage) {
@@ -298,26 +375,21 @@ export class ChatbotService {
           percentage
         };
         
-        const warning = percentage > 80 ? '⚠️ ' : percentage > 60 ? '⚡ ' : '';
-        console.log(`  🧠 Token Usage: ${warning}${totalTokens}/${maxTokens} (${tokenPercentage}%)`);
-        console.log(`     📤 Prompt: ${promptTokens} tokens`);
-        console.log(`     📥 Completion: ${completionTokens} tokens`);
-        
-        if (percentage > 80) {
-          console.log(`     ⚠️  WARNING: Approaching token limit! Consider reducing context or response length.`);
-        }
+        Logger.debug(`Token Usage: ${totalTokens}/${maxTokens} (${tokenPercentage}%), Prompt=${promptTokens}, Completion=${completionTokens}`);
       } else {
-        console.log(`  📝 Response length: ${response.length} characters`);
+        Logger.debug(`Response length: ${response.length} characters`);
       }
       
-      console.log(`  📊 Session: ${sessionId} (${session.messages.length} messages)`);
-      console.log(`  🗂️  Cache size: ${this.responseCache.size}/${this.responseCache.max}`);
+      Logger.debug(`Session: ${sessionId} (${session.messages.length} messages), Cache: ${this.responseCache.size}/${this.responseCache.max}`);
       
       // Cache the response
       this.responseCache.set(cacheKey, { response, timestamp: Date.now() });
       
       // Record metrics
       this.recordMetrics(metrics);
+      
+      // Log Q&A and metrics
+      Logger.info(`Q&A Log | sessionId=${sessionId} | user="${userMessage}" | ai="${response}" | metrics=${JSON.stringify(metrics)}`);
       
       return response;
       
@@ -329,7 +401,7 @@ export class ChatbotService {
     }
   }
 
-  // Streaming chat handler
+  // Streaming chat handler - uses same logic as handleMessage but streams the response
   async handleMessageStream(sessionId: string, userMessage: string) {
     const startTime = Date.now();
 
@@ -342,57 +414,184 @@ export class ChatbotService {
       // Get or create session
       const session = await this.getOrCreateSession(sessionId);
       
-      // Use intelligent query type selection for streaming
-      const searchQuery: SearchQuery = {
-        type: this.determineQueryType(userMessage),
+      // Use same logic as handleMessage for consistency
+      const searchResult = await this.redis.searchProperties({
+        type: 'exact',
         query: userMessage,
         filters: this.extractFilters(userMessage)
-      };
+      });
       
-      const searchResult = await this.redis.searchProperties(searchQuery);
-      
-      // Use OpenAI for streaming response
-      let messages: any[];
-      
-      if (searchResult.properties.length > 0) {
-        // Use heavily truncated property data to reduce token usage (reduced to 1000 tokens)
-        const truncatedProperties = this.truncatePropertyData(searchResult.properties, 1000);
-        
-        messages = [
-          {
-            role: 'system' as const,
-            content: `You are a helpful real estate assistant. Answer questions about properties based on the provided data. 
-
-IMPORTANT: You have access to property information including:
-- Address, unit details, rent, deposits
-- Pet policies
-- Basic property details
-
-Provide accurate, detailed answers using the available data. Keep responses concise and use bullet points for readability.
-
-Available properties:\n\n${JSON.stringify(truncatedProperties)}`
-          },
-          {
-            role: 'user' as const,
-            content: userMessage
-          }
-        ];
+      // After loading properties from Redis, cache their links
+      Logger.debug(`Search result properties: ${searchResult.properties?.length || 0} properties found`);
+      if (searchResult.properties && searchResult.properties.length > 0) {
+        Logger.debug(`Caching properties with IDs: ${searchResult.properties.map(p => p.listing_urls?.listing_id || 'NO_ID').join(', ')}`);
+        cacheAllPropertyLinks(searchResult.properties);
       } else {
-        // No properties found - use OpenAI for general response
-        messages = [
-          {
-            role: 'system' as const,
-            content: 'You are a helpful real estate assistant. The user is asking about properties but none were found matching their criteria. Provide a helpful response.'
-          },
-          {
-            role: 'user' as const,
-            content: userMessage
-          }
-        ];
+        Logger.debug('No properties found in search result');
       }
       
-      // Return the stream
-      return await this.openai.chatStream(messages);
+      // If no properties found, get all properties
+      if (!searchResult.properties || searchResult.properties.length === 0) {
+        const allPropertiesResult = await this.redis.searchProperties({
+          type: 'exact',
+          query: '*',
+          filters: {}
+        });
+        
+        if (allPropertiesResult.properties && allPropertiesResult.properties.length > 0) {
+          searchResult.properties = allPropertiesResult.properties;
+        }
+      }
+      
+      // Use OpenAI for intelligent responses (same logic as regular handleMessage)
+      const truncatedProperties = this.truncatePropertyData(searchResult.properties, 4000);
+      
+      const messages = [
+        {
+          role: 'system' as const,
+          content: `You are a fast, friendly, and conversion-focused real estate assistant for Lincoln Court. Greet the user by name if possible. Your job is to help prospective tenants find their perfect home and guide them toward scheduling tours or applying.
+
+Key principles:
+- Respond in 1-2 short, engaging sentences ONLY
+- Create urgency for available units ("These go fast!")
+- Provide clear, simple next steps ("Schedule a tour" or "Apply now")
+- Be helpful, never verbose
+- Always answer the user's question directly—do not just list properties
+- Do NOT generate or format links. Only refer to properties by name and unit number. The system will insert the correct links.
+
+For property queries:
+1. Brief excitement about available units
+2. Only the most relevant details (price, location, availability)
+3. End with a clear CTA
+
+If the user greets you, greet them back and offer to help find a home or answer questions.
+If the user asks a specific question, answer it directly and then offer a next step.
+
+Keep responses EXTREMELY FAST, CONCISE, and CONVERSION-FOCUSED.`
+        },
+        {
+          role: 'user' as const,
+          content: `Question: ${userMessage}\n\nProperties: ${JSON.stringify(truncatedProperties)}\n\nUse the EXACT format above with basic info only.`
+        }
+      ];
+      
+      let response = '';
+      let usage = null;
+      let metrics: PerformanceMetrics = {
+        redisLatency: 0,
+        openaiLatency: 0,
+        totalLatency: 0,
+        cacheHit: false,
+        propertiesFound: 0
+      };
+
+      const greetingRegex = /^(hello|hi|hey|greetings|good morning|good afternoon|good evening)[!,. ]*$/i;
+      if (greetingRegex.test(userMessage.trim())) {
+        const greetingResponse = "Hi there! I'm your Lincoln Court assistant. I can help you find available apartments, answer questions about our properties, or guide you to schedule a tour or apply. What would you like to do today?";
+        metrics.totalLatency = Date.now() - startTime;
+        Logger.info(`Q&A Log | sessionId=${sessionId} | user="${userMessage}" | ai="${greetingResponse}" | metrics=${JSON.stringify(metrics)}`);
+        
+        // Return a stream for the greeting response
+        return new ReadableStream({
+          async start(controller) {
+            for (let i = 0; i < greetingResponse.length; i++) {
+              const chunk = greetingResponse[i];
+              controller.enqueue(new TextEncoder().encode(chunk));
+              await new Promise(resolve => setTimeout(resolve, 20));
+            }
+            controller.close();
+          }
+        });
+      }
+
+      try {
+        const openaiStart = Date.now();
+        // Use non-streaming for content extraction, then convert to stream
+        const aiResponse = await this.openai.chat(messages, false);
+        response = typeof aiResponse === 'object' && 'content' in aiResponse ? aiResponse.content : '';
+        usage = typeof aiResponse === 'object' && 'usage' in aiResponse ? aiResponse.usage : null;
+        metrics.openaiLatency = Date.now() - openaiStart;
+
+        Logger.debug('OpenAI call successful');
+      } catch (error) {
+        console.error('OpenAI error in streaming:', error);
+        response = "I'm having trouble processing your request right now. Please try again.";
+        metrics.openaiLatency = Date.now() - startTime; // Set openaiLatency to total time
+      }
+      
+      // Add token usage if available
+      if (usage) {
+        metrics.tokenUsage = {
+          total: usage.total_tokens || 0,
+          prompt: usage.prompt_tokens || 0,
+          completion: usage.completion_tokens || 0,
+          percentage: 0
+        };
+      }
+
+      // Apply link replacement for streaming responses
+      if (truncatedProperties && truncatedProperties.length > 0) {
+        Logger.debug(`Link replacement: Found ${truncatedProperties.length} properties, cache has ${Object.keys(propertyLinkCache).length} entries`);
+        
+        // Ensure properties are cached even if using LangCache
+        if (Object.keys(propertyLinkCache).length === 0) {
+          Logger.debug('Property cache is empty, caching properties now');
+          cacheAllPropertyLinks(truncatedProperties);
+        }
+        
+        let fixedResponse = response;
+        truncatedProperties.slice(0, 2).forEach((p) => {
+          const links = propertyLinkCache[p.listing_urls.listing_id];
+          if (links) {
+            Logger.debug(`Replacing links for property ${p.listing_urls.listing_id}`);
+            fixedResponse = fixedResponse.replace(new RegExp(`\\[View Details[^\\]]*\\]\\([^)]*\\)`, 'g'), links.view);
+            fixedResponse = fixedResponse.replace(new RegExp(`\\[Schedule a tour[^\\]]*\\]\\([^)]*\\)`, 'g'), links.tour);
+            fixedResponse = fixedResponse.replace(new RegExp(`\\[Apply now[^\\]]*\\]\\([^)]*\\)`, 'g'), links.apply);
+          } else {
+            Logger.debug(`No cached links found for property ${p.listing_urls.listing_id}`);
+          }
+        });
+        
+        // If no links were found in the response, append them for the top property only
+        if (!fixedResponse.includes('[View Details]') && !fixedResponse.includes('[Schedule a tour]') && !fixedResponse.includes('[Apply now]')) {
+          Logger.debug('No links in response, appending default links');
+          // Only show the first property to avoid overwhelming the user
+          const topProperty = truncatedProperties[0];
+          if (topProperty) {
+            const links = propertyLinkCache[topProperty.listing_urls.listing_id];
+            if (links) {
+              fixedResponse += `\n\n${links.view} | ${links.tour} | ${links.apply}`;
+              Logger.debug(`Appended links for ${topProperty.listing_urls.listing_id}`);
+            }
+          }
+        }
+        
+        response = fixedResponse;
+        Logger.debug(`Final response length: ${response.length} characters`);
+      }
+
+      // Log Q&A and metrics for streaming
+      Logger.info(`Q&A Log | sessionId=${sessionId} | user="${userMessage}" | ai="${response}" | metrics=${JSON.stringify(metrics)}`);
+
+      // Convert the response to a stream
+      const stream = new ReadableStream({
+        async start(controller) {
+          // Ensure response is a string
+          const safeResponse = response || "I'm having trouble responding right now. Please try again.";
+          
+          // Stream the response in larger chunks for faster delivery
+          const chunkSize = 10; // Send 10 characters at a time
+          for (let i = 0; i < safeResponse.length; i += chunkSize) {
+            const chunk = safeResponse.slice(i, i + chunkSize);
+            controller.enqueue(new TextEncoder().encode(chunk));
+            await new Promise(resolve => setTimeout(resolve, 5)); // Reduced delay
+          }
+          
+          controller.close();
+        }
+      });
+      
+      return stream;
       
     } catch (error) {
       console.error('Streaming chat error:', error);
@@ -644,8 +843,25 @@ Available properties:\n\n${JSON.stringify(truncatedProperties)}`
   }
 
   // Determine query type for optimized search
-  private determineQueryType(userMessage: string): 'exact' | 'semantic' | 'hybrid' {
+  private determineQueryType(userMessage: string): 'exact' | 'semantic' | 'hybrid' | 'choice' | 'action' {
     const lowerMessage = userMessage.toLowerCase();
+    
+    // Check for action requests (tour, apply, details)
+    if (lowerMessage.includes('tour') || lowerMessage.includes('schedule') || lowerMessage.includes('visit') ||
+        lowerMessage.includes('apply') || lowerMessage.includes('application') || lowerMessage.includes('apply now') ||
+        lowerMessage.includes('details') || lowerMessage.includes('more info') || lowerMessage.includes('show me')) {
+      return 'action';
+    }
+    
+    // Check for choice responses
+    if (lowerMessage.includes('option 1') || lowerMessage.includes('option 2') ||
+        lowerMessage.includes('option 3') || lowerMessage.includes('option 4') ||
+        lowerMessage.includes('1') || lowerMessage.includes('2') ||
+        lowerMessage.includes('3') || lowerMessage.includes('4') ||
+        lowerMessage.includes('first') || lowerMessage.includes('second') ||
+        lowerMessage.includes('third') || lowerMessage.includes('fourth')) {
+      return 'choice';
+    }
     
     // Check for general property queries (should use exact search)
     const generalQueries = ['what properties', 'show me properties', 'all properties', 'list properties', 'available properties'];
@@ -666,21 +882,5 @@ Available properties:\n\n${JSON.stringify(truncatedProperties)}`
     return 'semantic';
   }
 
-  // Generate intelligent fallback response
-  private generateFallbackResponse(properties: TruncatedProperty[]): string {
-    if (properties.length === 0) {
-      return "I don't have any properties available at the moment. Please try again later or contact us for assistance.";
-    }
-    
-    const property = properties[0];
-    return `I found ${properties.length} properties available:
-
-**${property.property_name}**
-- **Address**: ${property.address.raw}
-- **Unit Details**: ${property.unit_details.beds} bed, ${property.unit_details.baths} bath, $${property.rental_terms.rent}/month
-- **Available**: ${property.unit_details.available}
-- **Pet Policy**: ${property.pet_policy.pets_allowed.allowed ? 'Pet Friendly' : 'No Pets'}
-
-This property is located in ${property.address.city}. Please contact us for more details or to schedule a viewing.`;
-  }
+  // Response generation is now handled by the shared ResponseGenerator service
 } 

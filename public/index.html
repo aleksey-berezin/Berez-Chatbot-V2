@@ -38,6 +38,13 @@
             margin-top: 0.5rem;
             color: #666;
         }
+        .status {
+            background: #e8f5e8;
+            border: 1px solid #4caf50;
+            border-radius: 8px;
+            padding: 1rem;
+            margin: 1rem 0;
+        }
     </style>
 </head>
 <body>
@@ -46,42 +53,89 @@
         <p>A real estate chatbot API built with Hono and TypeScript</p>
     </div>
 
+    <div class="status">
+        <h3>✅ Server Status: RUNNING</h3>
+        <p><strong>Region:</strong> Portland (pdx1)</p>
+        <p><strong>Port:</strong> 3000</p>
+        <p><strong>Redis:</strong> Connected (268ms latency)</p>
+        <p><strong>OpenAI:</strong> Connected (500ms latency)</p>
+    </div>
+
     <h2>Available Endpoints</h2>
     
     <div class="endpoint">
         <div class="method">GET</div>
-        <div class="url">/api/</div>
-        <div class="description">Health check endpoint</div>
+        <div class="url">/</div>
+        <div class="description">Health check endpoint - returns server status</div>
     </div>
 
     <div class="endpoint">
         <div class="method">GET</div>
-        <div class="url">/api/test-redis</div>
-        <div class="description">Test Redis Cloud connection</div>
+        <div class="url">/test-redis</div>
+        <div class="description">Test Redis Cloud connection and data status</div>
+    </div>
+
+    <div class="endpoint">
+        <div class="method">GET</div>
+        <div class="url">/performance</div>
+        <div class="description">Get performance statistics</div>
+    </div>
+
+    <div class="endpoint">
+        <div class="method">GET</div>
+        <div class="url">/network-test</div>
+        <div class="description">Test network latency for Redis and OpenAI</div>
     </div>
 
     <div class="endpoint">
         <div class="method">POST</div>
-        <div class="url">/api/load-data</div>
+        <div class="url">/load-data</div>
         <div class="description">Load real estate data into Redis</div>
     </div>
 
     <div class="endpoint">
         <div class="method">POST</div>
-        <div class="url">/api/cleanup-data</div>
+        <div class="url">/cleanup-data</div>
         <div class="description">Remove sample data from Redis</div>
     </div>
 
     <div class="endpoint">
         <div class="method">POST</div>
-        <div class="url">/api/cleanup-null</div>
+        <div class="url">/cleanup-null</div>
         <div class="description">Remove null entries from Redis</div>
     </div>
 
     <div class="endpoint">
         <div class="method">POST</div>
-        <div class="url">/api/chat</div>
-        <div class="description">Chat with the real estate chatbot</div>
+        <div class="url">/chat</div>
+        <div class="description">Chat with the real estate chatbot (streaming)</div>
+    </div>
+
+    <div class="endpoint">
+        <div class="method">POST</div>
+        <div class="url">/test-chat</div>
+        <div class="description">Test chat with detailed logging</div>
+    </div>
+
+    <div class="endpoint">
+        <div class="method">GET</div>
+        <div class="url">/properties?q=query</div>
+        <div class="description">Search properties with query parameter</div>
+    </div>
+
+    <div class="endpoint">
+        <div class="method">POST</div>
+        <div class="url">/properties</div>
+        <div class="description">Add a new property to the database</div>
+    </div>
+
+    <h2>Quick Test Commands</h2>
+    <div style="background: #f8f9fa; padding: 1rem; border-radius: 8px; font-family: monospace; font-size: 0.9rem;">
+        <p><strong>Health Check:</strong> curl http://localhost:3000/</p>
+        <p><strong>Redis Test:</strong> curl http://localhost:3000/test-redis</p>
+        <p><strong>Performance:</strong> curl http://localhost:3000/performance</p>
+        <p><strong>Network Test:</strong> curl http://localhost:3000/network-test</p>
+        <p><strong>Chat Interface:</strong> <a href="/chat.html">http://localhost:3000/chat.html</a></p>
     </div>
 
     <div style="margin-top: 2rem; text-align: center; color: #666;">

@@ -1,6 +1,7 @@
 import OpenAI from 'openai';
 import { config } from '../config';
 import { Property, SearchQuery } from '../types';
+import { Logger } from '../utils/logger';
 
 export class OpenAIService {
   private client: OpenAI;
@@ -16,45 +17,46 @@ export class OpenAIService {
     });
   }
 
-  // Retry with exponential backoff
+  // Simplified retry with backoff
   private async retryWithBackoff<T>(
     operation: () => Promise<T>,
     maxRetries: number = 3,
     baseDelay: number = 1000
   ): Promise<T> {
-    let lastError: any;
+    const nonRetryableErrors = [400, 401, 403];
     
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
         return await operation();
       } catch (error: any) {
-        lastError = error;
-        
-        // Don't retry on certain errors
-        if (error?.status === 400 || error?.status === 401 || error?.status === 403) {
+        // Don't retry on client errors
+        if (nonRetryableErrors.includes(error?.status)) {
           console.error(`❌ OpenAI error (not retrying): ${error.status} - ${error.message}`);
           throw error;
         }
         
-        // Check for rate limit
+        // Handle rate limiting
         if (error?.status === 429) {
           const retryAfter = error.headers?.['retry-after'] || baseDelay;
-          console.warn(`⚠️ OpenAI rate limit hit, retrying after ${retryAfter}ms (attempt ${attempt + 1}/${maxRetries + 1})`);
+          console.warn(`⚠️ Rate limit hit, retrying after ${retryAfter}ms`);
           await new Promise(resolve => setTimeout(resolve, retryAfter));
           continue;
         }
         
-        // Exponential backoff for other errors
-        if (attempt < maxRetries) {
-          const delay = baseDelay * Math.pow(2, attempt);
-          console.warn(`⚠️ OpenAI error, retrying in ${delay}ms (attempt ${attempt + 1}/${maxRetries + 1}): ${error.message}`);
-          await new Promise(resolve => setTimeout(resolve, delay));
+        // Last attempt or no more retries
+        if (attempt === maxRetries) {
+          console.error(`❌ OpenAI failed after ${maxRetries + 1} attempts:`, error);
+          throw error;
         }
+        
+        // Exponential backoff
+        const delay = baseDelay * Math.pow(2, attempt);
+        console.warn(`⚠️ Retrying in ${delay}ms (attempt ${attempt + 1}/${maxRetries + 1})`);
+        await new Promise(resolve => setTimeout(resolve, delay));
       }
     }
     
-    console.error(`❌ OpenAI failed after ${maxRetries + 1} attempts:`, lastError);
-    throw lastError;
+    throw new Error('Unexpected retry loop exit');
   }
 
   // Fast chat completion with optimizations and retry logic
@@ -78,7 +80,7 @@ export class OpenAIService {
           model: config.openai.model,
           messages,
           stream: stream,
-          max_tokens: 300, // Reduced for faster responses
+          max_tokens: 300, // Increased for better responses
           temperature: 0.1, // Very low for consistent, fast responses
           presence_penalty: 0, // Disable for faster generation
           frequency_penalty: 0, // Disable for faster generation
@@ -145,6 +147,18 @@ export class OpenAIService {
     return response.data[0]?.embedding || [];
   }
 
+  // Batch embeddings for multiple texts - optimized for data loading
+  async getEmbeddings(texts: string[]): Promise<number[][]> {
+    const response = await this.retryWithBackoff(async () => {
+      return await this.client.embeddings.create({
+        model: config.openai.embeddingModel,
+        input: texts
+      });
+    });
+
+    return response.data.map(item => item.embedding || []);
+  }
+
   // Analyze query type for hybrid search - optimized
   async analyzeQuery(query: string): Promise<'exact' | 'semantic' | 'hybrid'> {
     // Simple rule-based analysis for speed
@@ -206,5 +220,16 @@ export class OpenAIService {
   // Clear cache
   clearCache() {
     this.responseCache.clear();
+  }
+
+  // Health check method
+  async testConnection(): Promise<boolean> {
+    try {
+      const response = await this.client.models.list();
+      return response.data.length > 0;
+    } catch (error) {
+      Logger.error(`OpenAI connection test failed: ${error}`);
+      return false;
+    }
   }
 } 

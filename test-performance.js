@@ -1,4 +1,4 @@
-const fetch = require('node-fetch');
+// Using built-in fetch (Node.js 18+)
 
 async function testPerformance() {
   const baseUrl = 'http://localhost:3000';
